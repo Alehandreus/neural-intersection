@@ -1,7 +1,11 @@
 Train neural network to predict ray intersections
 
 ## Download Lego dataset with Git LFS
-WIP
+
+```
+git lfs pull
+cd datasets && unzup lego.zip
+```
 
 ## Run training
 
