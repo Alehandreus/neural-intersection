@@ -1,0 +1,6 @@
+hydra-core
+imageio
+matplotlib
+numpy
+torch
+tqdm
