@@ -8,7 +8,7 @@ Download Blender dataset from [Google Drive](https://drive.google.com/file/d/1xj
 ```
 gdown 1xjGKFszIP8dX7i_kOFq3RFZ7tSJHzPQM
 ```
-Run training with `python main.py -nc multiview`
+Run training with `python main.py -nc multiview`.
 
 ## 2. Sample Rays with Ray Tracing
 
@@ -18,7 +18,10 @@ contains original `.blend` file (zip archive) and `.stl` model. Download via bro
 ```
 gdown 1R_dUallEeDikQCaeFXthXS4b2XFHJQvc --folder
 ```
-Run training with `python main.py -nc raytrace`
+
+Generate rays from `.stl` with `python generate_rays.py` (update path to 3D model in `generate_rays.py` first).
+
+Run training with `python main.py -nc raytrace`.
 
 ## Notable Requirements
 - [tiny-cuda-nn](https://github.com/NVlabs/tiny-cuda-nn): `pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch`
