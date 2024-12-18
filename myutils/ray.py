@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from myutils.math import *
 
@@ -138,3 +139,147 @@ def get_rayparam_func(scene_info):
 def get_ray_param(ray_fn, rays):
     samples, hit_info = ray_fn(rays)
     return samples, hit_info["t0"].detach(), hit_info["ray_dir"]
+
+
+def to_bbox(origins, directions, extents):
+    """
+    Compute intersection points of rays with a zero-centered axis-aligned bounding box.
+
+    Args:
+        rays (torch.Tensor): Tensor of shape (N, 6), where each ray is defined by
+                             (ox, oy, oz, dx, dy, dz).
+        extents (torch.Tensor): Tensor of shape (3,) representing the positive extents
+                                (ex, ey, ez) of the bounding box.
+
+    Returns:
+        t1 (torch.Tensor): Tensor of shape (N,) with distances to the first intersection.
+        t2 (torch.Tensor): Tensor of shape (N,) with distances to the second intersection.
+        p1 (torch.Tensor): Tensor of shape (N, 3) with the first intersection points.
+        p2 (torch.Tensor): Tensor of shape (N, 3) with the second intersection points.
+    """
+    # Ensure input tensors are float
+    origins = origins.float()
+    directions = directions.float()
+    extents = extents.float()
+
+    # To avoid division by zero, replace zeros in direction with a very small number
+    eps = 1e-8
+    directions_safe = torch.where(directions.abs() < eps, torch.full_like(directions, eps), directions)
+
+    # Compute tmin and tmax for each axis
+    t1 = (-extents / directions_safe) + origins
+    t2 = (extents / directions_safe) + origins
+
+    # For each axis, find the tmin and tmax
+    tmin = torch.minimum(t1, t2)  # (N, 3)
+    tmax = torch.maximum(t1, t2)  # (N, 3)
+
+    # The overall t1 is the maximum of the tmins, and t2 is the minimum of the tmaxs
+    t1_global, _ = torch.max(tmin, dim=1)  # (N,)
+    t2_global, _ = torch.min(tmax, dim=1)  # (N,)
+
+    # Handle rays that are parallel and outside the bounding box
+    # If t1 > t2, there's no intersection
+    mask = t1_global > t2_global
+    t1_global = torch.where(mask, torch.full_like(t1_global, 0), t1_global)
+    t2_global = torch.where(mask, torch.full_like(t2_global, 1), t2_global)
+
+    # Compute intersection points
+    p1 = origins + t1_global.unsqueeze(1) * directions  # (N, 3)
+    p2 = origins + t2_global.unsqueeze(1) * directions  # (N, 3)
+
+    return t1_global.unsqueeze(1), t2_global.unsqueeze(1), ~mask
+
+
+def to_sphere_np(origins, vectors, sphere_location, sphere_radius, return_points=False):
+    oc = origins - sphere_location
+    a = np.sum(vectors ** 2, axis=1)
+    b = 2.0 * np.sum(oc * vectors, axis=1)
+    c = np.sum(oc ** 2, axis=1) - sphere_radius ** 2
+    discriminant = b * b - 4 * a * c
+
+    mask = discriminant > 0
+
+    t1 = np.zeros(origins.shape[0])
+    t2 = np.ones(origins.shape[0])
+
+    t1[mask] = (-b[mask] - np.sqrt(discriminant[mask])) / (2.0 * a[mask])
+    t2[mask] = (-b[mask] + np.sqrt(discriminant[mask])) / (2.0 * a[mask])
+
+    if return_points:
+        return np.concatenate([
+            origins + t1[..., None] * vectors,
+            origins + t2[..., None] * vectors,
+        ], axis=-1), mask
+    return t1[..., None], t2[..., None], mask
+
+
+def to_sphere_torch(origins, vectors, sphere_location, sphere_radius, return_points=False):
+    oc = origins - sphere_location
+    a = torch.sum(vectors ** 2, dim=1)
+    b = 2.0 * torch.sum(oc * vectors, dim=1)
+    c = torch.sum(oc ** 2, dim=1) - sphere_radius ** 2
+    discriminant = b * b - 4 * a * c
+
+    mask = discriminant > 0
+
+    # t1 = torch.zeros(origins.shape[0], device=origins.device)
+    # t2 = torch.ones(origins.shape[0], device=origins.device)
+
+    # t1 = torch.where(mask, torch.full_like(t1_global, 0), t1_global)
+    # t1 = torch.where(mask, torch.full_like(t2_global, 1), t2_global)
+
+    # sq = torch.sqrt(discriminant[mask])
+    discriminant = torch.where(discriminant > 0, discriminant, torch.full_like(discriminant, 0))
+
+    sq = torch.sqrt(discriminant)
+    t1 = (-b - sq) / (2.0 * a)
+    t2 = (-b + sq) / (2.0 * a)    
+
+    # t1[mask] = (-b[mask] - torch.sqrt(discriminant[mask])) / (2.0 * a[mask])
+    # t2[mask] = (-b[mask] + torch.sqrt(discriminant[mask])) / (2.0 * a[mask])
+
+    if return_points:
+        return torch.cat([
+            origins + t1[..., None] * vectors,
+            origins + t2[..., None] * vectors,
+        ], dim=-1), mask
+    return t1[..., None], t2[..., None], mask
+
+
+def to_sphere_torch_check(origins, vectors, sphere_location, sphere_radius, return_points=False):
+    oc = origins - sphere_location
+    a = torch.sum(vectors ** 2, dim=1)
+    b = 2.0 * torch.sum(oc * vectors, dim=1)
+    c = torch.sum(oc ** 2, dim=1) - sphere_radius ** 2
+    discriminant = b * b - 4 * a * c
+
+    mask = discriminant > 0
+
+    t1 = torch.zeros(origins.shape[0], device=origins.device)
+    t2 = torch.ones(origins.shape[0], device=origins.device)
+
+    t1[mask] = (-b[mask] - torch.sqrt(discriminant[mask])) / (2.0 * a[mask])
+    t2[mask] = (-b[mask] + torch.sqrt(discriminant[mask])) / (2.0 * a[mask])
+
+    if return_points:
+        return torch.cat([
+            origins + t1[..., None] * vectors,
+            origins + t2[..., None] * vectors,
+        ], dim=-1), mask
+    return t1[..., None], t2[..., None], mask
+
+
+def run_raytrace(mesh, origins, directions):
+    batch_size = 100000
+    n = origins.shape[0]
+    distances = np.zeros((n, 1))
+
+    for i in tqdm(range(0, n, batch_size)):
+        cur_batch_size = min(batch_size, n - i)
+        intersections, index_ray, index_tri = mesh.ray.intersects_location(origins[i:i+cur_batch_size], directions[i:i+cur_batch_size], multiple_hits=False)
+        distances_batch = np.zeros((cur_batch_size, 1))
+        distances_batch[index_ray] = np.linalg.norm(intersections - origins[index_ray], axis=1, keepdims=True)
+        distances[i:i+cur_batch_size] = distances_batch
+
+    return distances.astype(np.float32)

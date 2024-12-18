@@ -1,68 +1,43 @@
 import json
 import os
 
+import trimesh
 import imageio.v3 as imageio
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 from tqdm import tqdm
 
-from myutils.ray import get_rays_torch
+from myutils.ray import *
 
 
 class BlenderDataset(Dataset):
-    def __init__(self, cfg, split, mode="ray", batch_size=1024):
+    def __init__(self, cfg):
         super().__init__()
 
-        assert split in ["train", "test"]
-        assert mode in ["ray", "image"]
-
-        """
-        ray: 
-            shuffle rays from all images, sample -- single ray
-            ray: (N, 6)
-            dist: (N, 1)
-            mask: (N, 1)
-        image:
-            shuffle only images, sample -- 800x800 arr of all rays from single image. Useful for rendering.
-            ray: (N, H, W, 6)
-            dist: (N, H, W, 1)
-            mask: (N, H, W, 1)
-            img: (N, H, W, 3)
-        """
-
         self.cfg = cfg
-        self.split = split
-        self.mode = mode
-        self.batch_size = batch_size
 
-        with open(os.path.join(cfg.data_path, f'transforms_{self.split}.json'), 'r') as fp:
+        with open(os.path.join(self.cfg.data_path, f'transforms_{self.cfg.split}.json'), 'r') as fp:
             self.meta = json.load(fp)
 
         self.dists = []
         self.poses = []
-        if self.mode == "image": self.imgs = []
 
-        for frame in tqdm(self.meta['frames'], desc=f"Loading {self.split} meta"):
+        if self.cfg.start >= 0:
+            self.meta['frames'] = self.meta['frames'][self.cfg.start:self.cfg.finish:cfg.step]
+
+        for frame in tqdm(self.meta['frames'], desc=f"Loading {self.cfg.split} meta"):
             dist = np.load(os.path.join(cfg.data_path, frame['file_path'] + ".npy"))
             dist = torch.tensor(dist.astype(np.float32))
             self.dists.append(dist)
 
             self.poses.append(torch.tensor(frame['transform_matrix']))
 
-            if self.mode == "image":
-                img = imageio.imread(os.path.join(cfg.data_path, frame['file_path'] + '.png'))
-                img = torch.tensor(img.astype(np.float32))
-                img = (img / 255.0)[..., :3]
-                self.imgs.append(img)
-
         self.dists = torch.stack(self.dists)
         self.poses = torch.stack(self.poses)
-        if self.mode == "image": self.imgs = torch.stack(self.imgs) 
 
         self.masks = (self.dists != 8.0)
         self.dists *= self.masks
-        if self.mode == "image": self.imgs = self.imgs * self.masks[..., None] + (~self.masks[..., None])
 
         H, W = self.dists.shape[1:3]
         camera_angle_x = self.meta['camera_angle_x']
@@ -73,8 +48,6 @@ class BlenderDataset(Dataset):
             [0,         0,          -1      ]
         ])
         self.scene_info = {
-            'sphere_radius': self.cfg.scene_radius,
-            'sphere_center': [0., 0., 0.],
             'H': H,
             'W': W,
             'K': K,
@@ -82,60 +55,48 @@ class BlenderDataset(Dataset):
         }
 
         self.rays = []
-        for pose in tqdm(self.poses, desc=f"Computing rays for {self.split}"):
+        for pose in tqdm(self.poses, desc=f"Computing rays for {self.cfg.split}"):
             rays_o, rays_d = get_rays_torch(self.scene_info, pose)
             ray = torch.concatenate([rays_o, rays_d], -1)
             self.rays.append(ray)
         self.rays = torch.stack(self.rays, 0)
 
-        if self.mode == "ray":
-            self.rays = self.rays.reshape(-1, 6)
-            self.dists = self.dists.reshape(-1, 1)
-            self.masks = self.masks.reshape(-1, 1)
-        else:
-            self.dists = self.dists[..., None]
-            self.masks = self.masks[..., None]
-
-        # save min and max for 6 ray parameters (for normalization)
-        self.rays_min = self.rays.reshape(-1, 6).min(0).values
-        self.rays_max = self.rays.reshape(-1, 6).max(0).values
+        self.rays = self.rays.reshape(-1, 6)
+        self.dists = self.dists.reshape(-1, 1)
+        self.masks = self.masks.reshape(-1, 1)
+        self.points = torch.cat([self.rays[:, :3], self.rays[:, :3] + self.rays[:, 3:]], dim=1)
 
     def __len__(self):
         return len(self.dists)
     
     def __getitem__(self, index):
         item = {
+            'points': self.points[index],
             'ray': self.rays[index],
             'dist': self.dists[index],
             'mask': self.masks[index]
         }
-        if self.mode == "image":
-            item['img'] = self.imgs[index]
         return item
 
     def n_batches(self):
-        return len(self) // self.batch_size
+        return len(self) // self.cfg.batch_size
 
     def get_batch(self, index):
-        l = index * self.batch_size
-        r = l + self.batch_size
+        l = index * self.cfg.batch_size
+        r = l + self.cfg.batch_size
         item = {
+            'points': self.points[l:r],
             'ray': self.rays[l:r],
             'dist': self.dists[l:r],
             'mask': self.masks[l:r]
         }
-        if self.mode == "image":
-            item['img'] = self.imgs[l:r]
         return item
     
     def cuda(self):
         self.rays = self.rays.cuda()
         self.dists = self.dists.cuda()
         self.masks = self.masks.cuda()
-        if self.mode == "image":
-            self.imgs = self.imgs.cuda()
-        self.rays_min = self.rays_min.cuda()
-        self.rays_max = self.rays_max.cuda()
+        self.points = self.points.cuda()
         return self
     
     def shuffle(self):
@@ -143,10 +104,55 @@ class BlenderDataset(Dataset):
         self.rays = self.rays[ind]
         self.dists = self.dists[ind]
         self.masks = self.masks[ind]
-        if self.mode == "image":
-            self.imgs = self.imgs[ind]
+        self.points = self.points[ind]
         return self
     
-    def normalize(self, ray):
-        ray = (ray - self.rays_min) / (self.rays_max - self.rays_min)
-        return ray
+    def print_stats(self):
+        print(f"Fraction of valid rays: {self.masks[self.masks != 0].shape[0] / self.masks.shape[0]:.4f}")
+
+
+class RayTraceDataset(Dataset):
+    def __init__(self, cfg):
+        super().__init__()
+
+        self.cfg = cfg
+
+        data = np.load(self.cfg.data_path, allow_pickle=True).item()
+        self.points, self.distances = data["points"], data["distances"]
+
+        self.points = torch.tensor(self.points)
+        self.distances = torch.tensor(self.distances)
+    
+    def __len__(self):
+        return len(self.points)
+    
+    def __getitem__(self, index):
+        return {
+            'points': self.points[index],
+            'dist': self.distances[index]
+        }
+    
+    def n_batches(self):
+        return len(self) // self.cfg.batch_size
+
+    def get_batch(self, index):
+        l = index * self.cfg.batch_size
+        r = l + self.cfg.batch_size
+        return {
+            'points': self.points[l:r],
+            'dist': self.distances[l:r]
+        }
+    
+    def cuda(self):
+        self.points = self.points.cuda()
+        self.distances = self.distances.cuda()
+        return self
+    
+    def shuffle(self):
+        ind = torch.randperm(len(self.points))
+        self.points = self.points[ind]
+        self.distances = self.distances[ind]
+        return self
+
+    def print_stats(self):
+        print(f"Fraction of hitting rays: {self.distances[self.distances != 0].shape[0] / self.distances.shape[0]:.4f}")

@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 from torch import nn
+import itertools
 
 
 class Sin(nn.Module):
@@ -15,7 +16,7 @@ def sin_encoding(x, l):
     res = [x]
     for i in range(l):
         res.append(torch.sin((x / 1) * 2**i))
-        res.append(torch.cos((x / 1) ** i))
+        res.append(torch.cos((x / 1) * 2**i))
     return torch.cat(res, dim=-1)
 
 
@@ -36,3 +37,17 @@ class MetricLogger:
 
     def mean(self) -> float:
         return np.mean(self.metric_list)
+    
+    def ema(self) -> float:
+        return self.exp
+
+
+def get_num_params(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+# https://stackoverflow.com/a/5228294
+def product_dict(**kwargs):
+    keys = kwargs.keys()
+    for instance in itertools.product(*kwargs.values()):
+        yield dict(zip(keys, instance))

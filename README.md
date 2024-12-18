@@ -1,25 +1,25 @@
-Train neural network to predict ray intersections
+Train neural network to predict ray intersections. This repository explores two types of tasks:
+1. Reconstruct model from multiview images with depth channel;
+2. Learn model representations from randomly sampled rays (requires 3D model and ray tracing)
 
-## Download Lego dataset with Git LFS
+## 1. Multiview Reconstruction
 
+Download Blender dataset from [Google Drive](https://drive.google.com/file/d/1xjGKFszIP8dX7i_kOFq3RFZ7tSJHzPQM/view). `gdown` command:
 ```
-git lfs pull
-cd datasets && unzup lego.zip
+gdown 1xjGKFszIP8dX7i_kOFq3RFZ7tSJHzPQM
 ```
+Run training with `python main.py -nc multiview`
 
-## Run training
+## 2. Sample Rays with Ray Tracing
 
+Download Blender Bulldozer: [Google Drive folder](https://drive.google.com/drive/folders/1R_dUallEeDikQCaeFXthXS4b2XFHJQvc?usp=sharing)
+contains original `.blend` file (zip archive) and `.stl` model. Download via browser or with
+[gdown](https://github.com/wkentaro/gdown):
 ```
-python main.py
+gdown 1R_dUallEeDikQCaeFXthXS4b2XFHJQvc --folder
 ```
+Run training with `python main.py -nc raytrace`
 
-## Save dataset to binary
-
-```
-python save.py
-```
-
-## References
-1. [RayDF](https://github.com/vLAR-group/RayDF)
-2. [PyTorch HashGrid](https://github.com/Ending2015a/hash-grid-encoding)
-3. Other datasets (blender lego), code fragments, etc
+## Notable Requirements
+- [tiny-cuda-nn](https://github.com/NVlabs/tiny-cuda-nn): `pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch`
+- trimesh with Embree support

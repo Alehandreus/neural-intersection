@@ -1,0 +1,14 @@
+dataset_class: RayTraceDataset
+mesh_path: "datasets/lego_mesh/lego.stl"
+sphere_radius: 40
+
+train:
+  lr: 0.001
+  data_path: "datasets/lego_mesh/generated/train/0.npy"
+  batch_size: 10000
+val:
+  data_path: "datasets/lego_mesh/generated/data_5.npy"
+  batch_size: 10000
+cam:
+  data_path: "datasets/lego_mesh/generated/data_camera.npy"
+  batch_size: 10000

@@ -1,0 +1,25 @@
+dataset_class: BlenderDataset
+sphere_radius: 2
+
+train:
+  lr: 0.001
+  data_path: "datasets/lego/"
+  split: "train"
+  start: -1
+  finish: -1
+  step: -1
+  batch_size: 10000
+val:
+  data_path: "datasets/lego/"
+  split: "test"
+  start: 0
+  finish: 50
+  step: 1
+  batch_size: 10000
+cam:
+  data_path: "datasets/lego/"
+  split: "test"
+  start: 30
+  finish: 31
+  step: 1
+  batch_size: 10000
