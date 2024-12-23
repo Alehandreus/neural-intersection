@@ -1,6 +1,7 @@
 dataset_class: RayTraceDataset
 mesh_path: "datasets/lego_mesh/lego.stl"
 sphere_radius: 40
+log_dir: runs3
 
 train:
   lr: 0.001

@@ -15,6 +15,7 @@ from myutils.misc import *
 from myutils.ray import *
 import os
 import time
+import json
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -26,61 +27,53 @@ torch.set_float32_matmul_precision("high")
 
 
 class TransformerBlock(nn.Module):
-    def __init__(self, dim, num_heads=1, mlp_ratio=1):
+    def __init__(self, dim, attn=True, norm=True, use_tcnn=True):
         super().__init__()
-        self.attention = Attention(dim, num_heads=num_heads)
-        self.norm1 = nn.LayerNorm(dim)
-        self.norm2 = nn.LayerNorm(dim)
-        self.ff = tcnn.Network(
-            dim,
-            dim,
-            {
-                "otype": "CutlassMLP",
-                "activation": "ReLU",
-                "output_activation": "None",
-                "n_neurons": dim,
-                "n_hidden_layers": 4,
-            },
+        self.attn = attn
+        self.norm = norm
+        self.use_tcnn = use_tcnn
+
+        self.attention = Attention(dim, num_heads=1) if attn else nn.Identity()
+        self.norm1 = nn.LayerNorm(dim) if norm else nn.Identity()
+        self.norm2 = nn.LayerNorm(dim) if norm else nn.Identity()
+
+        self.ff = tcnn.Network(dim, dim, {
+            "otype": "CutlassMLP",
+            "activation": "ReLU",
+            "output_activation": "None",
+            "n_neurons": dim,
+            "n_hidden_layers": 6 - 2,
+        }) if use_tcnn else nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, dim),
+            nn.ReLU(),
+            nn.Linear(dim, dim),
         )
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x):
         n, s, d = x.shape
 
-        x = x + self.attention(x)
-        x = self.norm1(x)
+        if self.attn:
+            x = x + self.attention(x)
+
+            if self.norm:
+                x = self.norm1(x)
 
         x = x.reshape(n * s, d)
         x = x + self.ff(x).float()
         x = x.reshape(n, s, d)
-        x = self.norm2(x)
+
+        if self.norm:
+            x = self.norm2(x)
 
         return x
-
-
-class Transformer(nn.Module):
-    def __init__(self, dim, depth, heads, mlp_ratio):
-        from timm.models.vision_transformer import Block
-
-        super().__init__()
-        self.layers = nn.Sequential(
-            *[
-                TransformerBlock(
-                    dim=dim,
-                    num_heads=heads,
-                    mlp_ratio=mlp_ratio,
-                    # norm_layer=nn.Identity,
-                )
-                for _ in range(depth)
-            ]
-            # *[
-            #     Block(dim, dim, heads, mlp_ratio)
-            #     for _ in range(depth)
-            # ]
-        )
-
-    def forward(self, x):
-        return self.layers(x)
-
 
 class AttentionPooling(nn.Module):
     def __init__(self, embedding_size):
@@ -184,15 +177,33 @@ class SinEncoder(nn.Module):
 
 
 class TransformerNet(nn.Module):
-    def __init__(self, dim, n_layers, n_points, mlp_ratio=1):
+    def __init__(self, dim, n_layers, n_points, attn=True, norm=True, use_tcnn=True):
         super().__init__()
 
         self.dim = dim
         self.n_layers = n_layers
         self.n_points = n_points
 
+        self.attn = attn
+        self.norm = norm
+        self.use_tcnn = use_tcnn
+
         self.up = nn.LazyLinear(self.dim)
-        self.transformer = Transformer(self.dim, self.n_layers, 1, mlp_ratio)
+
+        if attn or norm or not use_tcnn:
+            self.layers = nn.Sequential(*[
+                TransformerBlock(dim=dim, attn=attn, norm=norm, use_tcnn=use_tcnn)
+                for _ in range(n_layers)
+            ])
+        else:
+            self.layers = tcnn.Network(dim, dim, {
+                "otype": "CutlassMLP",
+                "activation": "ReLU",
+                "output_activation": "None",
+                "n_neurons": dim,
+                "n_hidden_layers": 6 * n_layers - 2,
+            })
+
         self.cls = nn.Sequential(
             AttentionPooling(self.dim),
             nn.Linear(self.dim, 1),
@@ -202,13 +213,12 @@ class TransformerNet(nn.Module):
         self.dist = nn.Sequential(
             AttentionPooling(self.dim),
             nn.Linear(self.dim, 1),
-            # nn.ReLU(),
         )
 
     def forward(self, x, t1, t2, bbox_mask):
         cls_pred, dist_cls_pred, dist_val_pred, dist_pred = self.forward_features(x)
 
-        dist_per_segment = (t2 - t1) / (self.n_points - 1)
+        dist_per_segment = (t2 - t1) / dist_val_pred.shape[1]
         dist_segment_pred = dist_cls_pred.argmax(dim=1)
 
         b = (
@@ -222,7 +232,7 @@ class TransformerNet(nn.Module):
     def forward_features(self, x):
         x = x.reshape(x.shape[0], self.n_points, -1)
 
-        x = torch.cat(
+        y = torch.cat(
             [
                 x[:, 1:],
                 x[:, :-1],
@@ -230,9 +240,20 @@ class TransformerNet(nn.Module):
             dim=-1,
         )
 
-        x = self.up(x)
-        x = self.transformer(x)
-        return self.cls(x), self.dist_cls(x), self.dist_val(x), self.dist(x)
+        # k = 8
+        # y = x.reshape(x.shape[0], self.n_points // k, -1)
+        # x_ext = torch.cat([x, torch.zeros(x.shape[0], 1, x.shape[2], device="cuda")], dim=1)
+        # y = torch.cat([y, x_ext[:, k::k, :]], dim=-1)
+
+        y = self.up(y)
+        if self.attn or self.norm or not self.use_tcnn:
+            y = self.layers(y)
+        else:
+            n, s, d = y.shape
+            y = y.reshape(n * s, d)
+            y = self.layers(y).float()
+            y = y.reshape(n, s, d)
+        return self.cls(y), self.dist_cls(y), self.dist_val(y), self.dist(y)
 
     def get_loss(self, x, t1, t2, bbox_mask, mask, dist):
         mask = mask & bbox_mask.unsqueeze(1)
@@ -242,7 +263,7 @@ class TransformerNet(nn.Module):
         dist_adj = dist - t1
         dist_adj[~mask] = 0
 
-        dist_per_segment = (t2 - t1) / (self.n_points - 1)
+        dist_per_segment = (t2 - t1) / dist_val_pred.shape[1]
         dist_segment = (dist_adj / dist_per_segment).long()
         dist_segment_pred = dist_cls_pred.argmax(dim=1)
 
@@ -276,30 +297,30 @@ class TransformerNet(nn.Module):
 
 
 class MLPNet(nn.Module):
-    def __init__(self, dim, n_layers):
+    def __init__(self, dim, n_layers, use_tcnn=True):
         super().__init__()
 
-        self.net = nn.Sequential(
-            nn.LazyLinear(dim),
-            nn.ReLU(),
-            tcnn.Network(
-                dim,
-                dim,
-                {
+        if use_tcnn:
+            self.net = nn.Sequential(
+                nn.LazyLinear(dim),
+                nn.ReLU(),
+                tcnn.Network(dim, dim, {
                     "otype": "CutlassMLP",
                     "activation": "ReLU",
                     "output_activation": "None",
                     "n_neurons": dim,
                     "n_hidden_layers": n_layers - 3,
-                },
-            ),
-        )
+                }),
+            )
+        else:
+            self.net = [nn.LazyLinear(dim)]
+            for _ in range(n_layers - 1):
+                self.net.append(nn.ReLU())
+                self.net.append(nn.Linear(dim, dim))
+            self.net = nn.Sequential(*self.net)                
 
         self.cls = nn.Linear(dim, 1)
-        self.dist = nn.Sequential(
-            nn.Linear(dim, 1),
-            # nn.ReLU(),
-        )
+        self.dist = nn.Linear(dim, 1)
 
     def forward(self, x, t1, t2, bbox_mask):
         x = self.net(x).float()
@@ -319,6 +340,114 @@ class MLPNet(nn.Module):
         if acc.item() > 0.80:
             loss = loss + mse / 100
         return loss, acc, mse
+    
+
+class BinSearchModel(nn.Module):
+    def __init__(self, cfg, encoder, dim, n_layers, n_iter=6):
+        super().__init__()
+
+        self.encoder = encoder
+        self.point_encoder = NPointEncoder(N=8, sphere_radius=cfg.sphere_radius)
+        self.dim = dim
+        self.n_layers = n_layers
+        self.n_iter = n_iter
+
+        self.net = nn.Sequential(
+            nn.LazyLinear(dim),
+            nn.ReLU(),
+            tcnn.Network(
+                dim,
+                dim,
+                {
+                    "otype": "CutlassMLP",
+                    "activation": "ReLU",
+                    "output_activation": "None",
+                    "n_neurons": dim,
+                    "n_hidden_layers": n_layers - 3,
+                },
+            ),
+        )
+
+        self.cls_global = nn.Linear(dim, 1)
+        self.cls = nn.Linear(dim, 1)
+        self.dist = nn.Sequential(
+            nn.Linear(dim, 1),
+            # nn.ReLU(),
+        )
+    
+    def get_loss(self, x, mask, dist):
+        points, bbox_mask, t1, t2 = self.point_encoder(x)
+        # first = points[:, :3].clone()
+        # second = points[:, 3:].clone()
+
+        # first_emb = self.encoder(first)
+        # second_emb = self.encoder(second)
+        points_emb = self.point_encoder(points)
+        y = self.net(points_emb).float()
+        cls_global_pred = self.cls_global(y)
+        cls_global_loss = F.binary_cross_entropy_with_logits(cls_global_pred, mask.float())
+        acc1 = ((cls_global_pred > 0) == mask).float().mean()
+
+        first_t = torch.rand((points.shape[0], 1), device="cuda") / 2
+        second_t = torch.rand((points.shape[0], 1), device="cuda") / 2 + 0.5
+
+        first = first + first_t * (second - first)
+        second = second + second_t * (second - first)
+
+        first_emb = self.encoder(first)
+        second_emb = self.encoder(second)
+
+        points_emb = torch.cat([first_emb, second_emb], dim=1)
+        y = self.net(points_emb).float()
+        cls_pred = self.cls(y)
+        dist_pred = self.dist(y) + t1 + first_t * (t2 - t1)
+
+        cls_true = dist > t1 + first_t * (t2 - t1) + 0.5 * (second_t - first_t) * (t2 - t1)
+        cls_loss = F.binary_cross_entropy_with_logits(cls_pred[mask], cls_true[mask].float())
+        dist_loss = F.mse_loss(dist_pred[mask], dist[mask])
+
+        acc2 = ((cls_pred > 0) == cls_true).float().mean()
+        mse = F.mse_loss(dist_pred[mask], dist[mask])
+        # mse = torch.tensor(0, device="cuda")
+        
+        loss = cls_global_loss
+        # if acc1.item() > 0.80:
+        #     loss = cls_global_loss + cls_loss + dist_loss / 100
+        
+        return loss, acc1, mse
+
+    def forward(self, x):
+        points, bbox_mask, t1, t2 = self.point_encoder(x)
+        first = points[:, :3].clone()
+        second = points[:, 3:].clone()
+        mid = (first + second) / 2
+
+        first_emb = self.encoder(first)
+        second_emb = self.encoder(second)
+        points_emb = torch.cat([first_emb, second_emb], dim=1)
+
+        y = self.net(points_emb).float()
+        cls_global = self.cls_global(y)
+
+        # for iter in range(self.n_iter - 1):
+        #     first_emb = self.encoder(first)
+        #     second_emb = self.encoder(second)
+        #     points_emb = torch.cat([first_emb, second_emb], dim=1)
+
+        #     y = self.net(points_emb).float()
+        #     if iter == 0: cls_global = self.cls_global(y)
+        #     cls = self.cls(y)
+
+        #     mask = (cls > 0).float()
+        #     first = mask * mid + (1 - mask) * first
+        #     second = mask * second + (1 - mask) * mid
+        #     mid = (first + second) / 2
+
+        dist = self.dist(y) + t1
+        dist[cls_global < 0] = 0
+        dist[cls_global >= 0] = 1
+    
+        return cls_global, dist
 
 
 class Model(nn.Module):
@@ -329,17 +458,12 @@ class Model(nn.Module):
         self.net = net
 
     def get_loss(self, x, mask, dist):
-        torch.compiler.cudagraph_mark_step_begin()
         x, bbox_mask, t1, t2 = self.point_encoder(x)
-        # print(f'bbox: {bbox_mask.sum()}')
-        # if (~bbox_mask & (dist > 0)).sum() > 0:
-        #     print('КАРАМБА')
         if self.encoder:
             x = self.encoder(x)
         return self.net.get_loss(x, t1, t2, bbox_mask, mask, dist)
 
     def forward(self, x):
-        torch.compiler.cudagraph_mark_step_begin()
         x, bbox_mask, t1, t2 = self.point_encoder(x)
         if self.encoder:
             x = self.encoder(x)
@@ -376,7 +500,7 @@ class Trainer:
 
         if name is None:
             name = f"{time.time()}"
-        self.writer = SummaryWriter("runs2/" + name)
+        self.writer = SummaryWriter(self.cfg.log_dir + '/' + name)
         self.n_steps = 0
         self.n_epoch = 0
 
@@ -399,9 +523,7 @@ class Trainer:
             self.logger_acc.update(acc.item())
             self.logger_mse.update(mse.item())
 
-            bar.set_description(
-                f"loss: {self.logger_loss.ema():.3f}, acc: {self.logger_acc.ema():.3f}, mse: {self.logger_mse.ema():.3f}"
-            )
+            bar.set_description(f"loss: {self.logger_loss.ema():.3f}, acc: {self.logger_acc.ema():.3f}, mse: {self.logger_mse.ema():.3f}")
 
             self.writer.add_scalar("Loss/train", self.logger_loss.ema(), self.n_steps)
             self.writer.add_scalar("Acc/train", self.logger_acc.ema(), self.n_steps)
@@ -433,9 +555,7 @@ class Trainer:
             val_acc += acc.item()
             val_mse += mse.item()
 
-            bar.set_description(
-                f"val_loss: {val_loss / (batch_idx + 1):.3f}, val_acc: {val_acc / (batch_idx + 1):.3f}, mse: {val_mse / (batch_idx + 1):.3f}"
-            )
+            bar.set_description(f"val_loss: {val_loss / (batch_idx + 1):.3f}, val_acc: {val_acc / (batch_idx + 1):.3f}, mse: {val_mse / (batch_idx + 1):.3f}")
 
         val_loss /= self.ds_val.n_batches()
         val_acc /= self.ds_val.n_batches()
@@ -458,6 +578,8 @@ class Trainer:
         img_dist_pred = torch.zeros((800 * 800, 1), device="cuda")
 
         bar = tqdm(range(self.ds_cam.n_batches()), leave=self.tqdm_leave)
+
+        start = time.time()
         for batch_idx in bar:
             batch = self.ds_cam.get_batch(batch_idx)
             points, dist = batch["points"], batch["dist"]
@@ -472,19 +594,33 @@ class Trainer:
                 dist_pred
             )
             img_dist[batch_idx * batch_size : (batch_idx + 1) * batch_size] = dist
+        torch.cuda.synchronize()
+        finish = time.time()
+        t = finish - start
 
-        img_dist = img_dist.reshape(800, 800, 1)
-        img_mask_pred = img_mask_pred.reshape(800, 800, 1)
-        img_dist_pred = img_dist_pred.reshape(800, 800, 1)
+        img_dist = img_dist.reshape(1, 800, 800, 1)
+        img_mask_pred = img_mask_pred.reshape(1, 800, 800, 1)
+        img_dist_pred = img_dist_pred.reshape(1, 800, 800, 1) * (img_mask_pred > 0)
+
+        # img_dist = cut_edges(img_dist)
+        # img_dist_pred = cut_edges(img_dist_pred)
+        # mse_edge = F.mse_loss(img_dist, img_dist_pred).item()
 
         fig, ax = plt.subplots(1, 2, figsize=(10, 5))
         ax[0].axis("off")
-        ax[0].imshow(img_dist.cpu())
+        ax[0].imshow(img_dist[0].cpu().numpy())
         ax[1].axis("off")
-        ax[1].imshow((img_dist_pred * (img_mask_pred > 0)).cpu().numpy())
+        ax[1].imshow(img_dist_pred[0].cpu().numpy())
         plt.tight_layout()
         plt.savefig("fig.png")
         plt.clf()
+
+        # self.writer.add_scalar("MSE_edge/val", mse_edge, self.n_steps)
+        # print("MSE_edge:", mse_edge)
+
+        return {
+            'time': t,
+        }
 
     def get_results(self, n_epochs=3):
         results = {}
@@ -492,27 +628,30 @@ class Trainer:
             train_res = self.train()
             val_res = self.val()
             results[i] = {**train_res, **val_res}
-            self.cam()
+            cam_res = self.cam()
+            results[i].update(cam_res)
+            results[i]['enc_params'] = get_num_params(self.model.encoder)
+            results[i]['net_params'] = get_num_params(self.model.net)
         return results
 
 
-@hydra.main(config_path="config", config_name="multiview", version_base=None)
+@hydra.main(config_path="config", config_name="raytrace", version_base=None)
 def main(cfg):
     print(f"Loading data from {cfg.dataset_class}")
     trainer = Trainer(cfg, tqdm_leave=True)
 
     point_encoder = NPointEncoder(N=32, sphere_radius=cfg.sphere_radius)
-    encoder = HashGridEncoder(
-        range=1, dim=3, log2_hashmap_size=12, finest_resolution=256
-    )
+    encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=20, finest_resolution=512)
     # encoder = SinEncoder(8, 1)
     # encoder = None
-    # net = MLPNet(512, 16)
-    net = TransformerNet(32, 3, 32)
+    net = MLPNet(256, 8, use_tcnn=True)
+    # net = TransformerNet(24, 6, 32, use_tcnn=True, attn=True, norm=True)
     model = Model(point_encoder, encoder, net).cuda()
 
-    # name = 'mlp_d256_l8_p16_hg17'
-    # name = 'att_d24_l6_p16_hg11'
+    # model = BinSearchModel(cfg, encoder, 256, 8).cuda()
+
+    # name = 'mlp_d256_l8_p16_hg20'
+    # name = 'att_d24_l3_p32_hg20'
     name = "exp4"
     trainer.set_model(model, name)
     trainer.cam()
@@ -522,7 +661,7 @@ def main(cfg):
 
 if __name__ == "__main__":
     try:
-        main()
+        main()        
     except KeyboardInterrupt:
         print("Stopping...")
         exit()

@@ -2,6 +2,7 @@ import numpy as np
 import torch
 from torch import nn
 import itertools
+import torch.nn.functional as F
 
 
 class Sin(nn.Module):
@@ -51,3 +52,12 @@ def product_dict(**kwargs):
     keys = kwargs.keys()
     for instance in itertools.product(*kwargs.values()):
         yield dict(zip(keys, instance))
+
+
+def cut_edges(img):
+    edge = torch.tensor([[[[0, 1, 0], [1, -4, 1], [0, 1, 0]]]], dtype=torch.float32, device=img.device)
+    img = torch.permute(img, (0, 3, 1, 2))
+    edge_img = (F.conv2d(img, edge, padding=1) < 0).float()
+    mixed = (1 - edge_img) * img
+    mixed = torch.permute(mixed, (0, 2, 3, 1))
+    return mixed
