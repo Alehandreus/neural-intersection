@@ -36,6 +36,17 @@ Update `config/raytrace.yaml` and run training with `python main.py -cn raytrace
 - [ ] **Train transformer classifier on edge rays** (hard to implement)
 - [ ] **Give MSE more weight near sharp corners**: combat blur
 
+## NBVH performance
+`Path Max Depth`: 2, `Disable Neural BLAS`: **300 frames per second**
+- `dim`: 64, `n_layers`: 4, `n_levels`: 14, `n_features_per_level`: 2, `log2_hashmap_size`: 22: **67 frames per second**
+- `dim`: 64, `n_layers`: 4, `n_levels`: 8, `n_features_per_level`: 4, `log2_hashmap_size`: 18: **150 frames per second**
+- `dim`: 64, `n_layers`: 4, `n_levels`: 8, `n_features_per_level`: 4, `log2_hashmap_size`: 14: **175 frames per second**
+- `dim`: 128, `n_layers`: 8, `n_levels`: 14, `n_features_per_level`: 2, `log2_hashmap_size`: 22: **60 frames per second**
+- `dim`: 128, `n_layers`: 8, `n_levels`: 8, `n_features_per_level`: 4, `log2_hashmap_size`: 18: **110 frames per second**
+- `dim`: 128, `n_layers`: 8, `n_levels`: 8, `n_features_per_level`: 4, `log2_hashmap_size`: 14: **120 frames per second**
+
+![no image?](https://i.imgur.com/Eyr2LtZ.png)
+
 ## Results
 
 First (weird) table with model comparison. Models are:
