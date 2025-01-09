@@ -123,6 +123,68 @@ class _HashGrid(nn.Module):
         hash_ids = fast_hash(inds, self.primes, self.hashmap_size)  # (b..., neig)
         neig_data = self.embedding(hash_ids)  # (b..., neig, feat)
         return torch.sum(neig_data * w, dim=-2)  # (b..., feat)
+    
+
+class _HashGridLoRA(nn.Module):
+    def __init__(self, dim: int, n_features: int, hashmap_size: int, resolution: float, rank: int):
+        super().__init__()
+        self.dim = dim
+        self.n_features = n_features
+        self.hashmap_size = hashmap_size
+        self.resolution = resolution
+
+        # you can add more primes for supporting more dimensions
+        assert self.dim <= len(
+            PRIMES
+        ), f"HashGrid only supports < {len(PRIMES)}-D inputs"
+
+        # create look-up table
+        total_size = hashmap_size * n_features
+        log2 = int(math.log2(total_size))
+        assert total_size == 2 ** log2, "hashmap_size * n_features must be power of 2"
+        L_size = 2 ** (log2 // 2)
+        R_size = 2 ** (log2 - log2 // 2)
+        self.L = nn.Parameter(torch.randn(L_size, rank))
+        self.R = nn.Parameter(torch.randn(rank, R_size))
+        nn.init.uniform_(self.L, a=-0.0001, b=0.0001)
+        nn.init.uniform_(self.R, a=-0.0001, b=0.0001)
+
+        primes = torch.tensor(PRIMES, dtype=torch.int64)
+        self.register_buffer("primes", primes, persistent=False)
+
+        # create interpolation binary mask
+        n_neigs = 1 << self.dim
+        neigs = np.arange(n_neigs, dtype=np.int64).reshape((-1, 1))
+        dims = np.arange(self.dim, dtype=np.int64).reshape((1, -1))
+        bin_mask = torch.tensor(neigs & (1 << dims) == 0, dtype=bool)  # (neig, dim)
+        self.register_buffer("bin_mask", bin_mask, persistent=False)
+
+    def forward(self, x: torch.Tensor):
+        # x: (b..., dim), torch.float32, range: [0, 1]
+        bdims = len(x.shape[:-1])
+        x = x * self.resolution
+        xi = x.long()
+        xf = x - xi.float().detach()
+        xi = xi.unsqueeze(dim=-2)  # (b..., 1, dim)
+        xf = xf.unsqueeze(dim=-2)  # (b..., 1, dim)
+        # to match the input batch shape
+        bin_mask = self.bin_mask.reshape(
+            (1,) * bdims + self.bin_mask.shape
+        )  # (1..., neig, dim)
+        # get neighbors' indices and weights on each dim
+        inds = torch.where(bin_mask, xi, xi + 1)  # (b..., neig, dim)
+        ws = torch.where(bin_mask, 1 - xf, xf)  # (b...., neig, dim)
+        # aggregate nehgibors' interp weights
+        w = ws.prod(dim=-1, keepdim=True)  # (b..., neig, 1)
+        # hash neighbors' id and look up table
+        hash_ids = fast_hash(inds, self.primes, self.hashmap_size)  # (b..., neig)
+
+        LR = self.L @ self.R
+        LR = LR.view(-1, self.n_features)
+        neig_data = LR[hash_ids]  # (b..., neig, feat)
+
+        # neig_data = self.embedding(hash_ids)  # (b..., neig, feat)
+        return torch.sum(neig_data * w, dim=-2)  # (b..., feat)
 
 
 class MultiResHashGrid(nn.Module):
@@ -134,6 +196,7 @@ class MultiResHashGrid(nn.Module):
         log2_hashmap_size: int = 15,
         base_resolution: int = 16,
         finest_resolution: int = 512,
+        rank=None,
     ):
         """NVidia's hash grid encoding
         https://nvlabs.github.io/instant-ngp/
@@ -170,14 +233,26 @@ class MultiResHashGrid(nn.Module):
         for level_idx in range(n_levels):
             resolution = math.floor(base_resolution * (b**level_idx))
             hashmap_size = min(resolution**dim, 2**log2_hashmap_size)
-            levels.append(
-                _HashGrid(
-                    dim=dim,
-                    n_features=n_features_per_level,
-                    hashmap_size=hashmap_size,
-                    resolution=resolution,
+            hashmap_size = 2**math.ceil(math.log2(hashmap_size))
+            if rank is None:
+                levels.append(
+                    _HashGrid(
+                        dim=dim,
+                        n_features=n_features_per_level,
+                        hashmap_size=hashmap_size,
+                        resolution=resolution,
+                    )
                 )
-            )
+            else:
+                levels.append(
+                    _HashGridLoRA(
+                        dim=dim,
+                        n_features=n_features_per_level,
+                        hashmap_size=hashmap_size,
+                        resolution=resolution,
+                        rank=rank,
+                    )
+                )
         self.levels = nn.ModuleList(levels)
 
         self.input_dim = dim

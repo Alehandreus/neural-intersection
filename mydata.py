@@ -116,12 +116,19 @@ class RayTraceDataset(Dataset):
         super().__init__()
 
         self.cfg = cfg
+        
+        if os.path.isfile(self.cfg.data_path):
+            self.names = [self.cfg.data_path]
+        else:
+            self.names = os.listdir(self.cfg.data_path)
+            self.names = [os.path.join(self.cfg.data_path, name) for name in self.names]
+        self.cur_name = 0
+        self.device = 'cpu'
 
-        data = np.load(self.cfg.data_path, allow_pickle=True).item()
+        data = np.load(self.names[self.cur_name], allow_pickle=True).item()
         self.points, self.distances = data["points"], data["distances"]
-
-        self.points = torch.tensor(self.points)
-        self.distances = torch.tensor(self.distances)
+        self.points = torch.tensor(self.points, device=self.device)
+        self.distances = torch.tensor(self.distances, device=self.device)       
     
     def __len__(self):
         return len(self.points)
@@ -144,14 +151,23 @@ class RayTraceDataset(Dataset):
         }
     
     def cuda(self):
+        self.device = 'cuda'
         self.points = self.points.cuda()
         self.distances = self.distances.cuda()
         return self
     
     def shuffle(self):
+        print(f"| RayTraceDataset: loading {self.names[self.cur_name]}")
+        data = np.load(self.names[self.cur_name], allow_pickle=True).item()
+        self.points, self.distances = data["points"], data["distances"]
+        self.points = torch.tensor(self.points, device=self.device)
+        self.distances = torch.tensor(self.distances, device=self.device)
+
         ind = torch.randperm(len(self.points))
         self.points = self.points[ind]
         self.distances = self.distances[ind]
+
+        self.cur_name = (self.cur_name + 1) % len(self.names)
         return self
 
     def print_stats(self):

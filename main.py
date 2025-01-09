@@ -159,6 +159,40 @@ class HashGridEncoder(nn.Module):
         x = self.enc(x).float()
         x = x.reshape(*orig_shape[:-1], -1)
         return x
+    
+
+class HashGridLoRAEncoder(nn.Module):
+    def __init__(
+        self,
+        range,
+        dim=3,
+        n_levels=16,
+        n_features_per_level=2,
+        log2_hashmap_size=15,
+        base_resolution=16,
+        finest_resolution=512,
+        rank=None,
+    ):
+        super().__init__()
+        self.input_dim = dim
+        self.enc = hashgrid.MultiResHashGrid(
+            dim=dim,
+            n_levels=n_levels,
+            n_features_per_level=n_features_per_level,
+            log2_hashmap_size=log2_hashmap_size,
+            base_resolution=base_resolution,
+            finest_resolution=finest_resolution,
+            rank=rank,
+        )
+        self.range = range
+
+    def forward(self, x):
+        x = (x + self.range) / (2 * self.range)
+        orig_shape = x.shape
+        x = x.reshape(-1, self.input_dim)
+        x = self.enc(x).float()
+        x = x.reshape(*orig_shape[:-1], -1)
+        return x    
 
 
 class SinEncoder(nn.Module):
@@ -253,7 +287,7 @@ class TransformerNet(nn.Module):
             y = y.reshape(n * s, d)
             y = self.layers(y).float()
             y = y.reshape(n, s, d)
-        return self.cls(y), self.dist_cls(y), self.dist_val(y), self.dist(y)
+        return self.cls(y), self.dist_cls(y), self.dist_val(y).clamp(0, 1), self.dist(y)
 
     def get_loss(self, x, t1, t2, bbox_mask, mask, dist):
         mask = mask & bbox_mask.unsqueeze(1)
@@ -268,12 +302,12 @@ class TransformerNet(nn.Module):
         dist_segment_pred = dist_cls_pred.argmax(dim=1)
 
         a = (
-            torch.gather(dist_val_pred, 1, dist_segment[:, None]).squeeze(1)
+            torch.gather(dist_val_pred, 1, dist_segment[:, None]).squeeze(1) * dist_per_segment
             + dist_segment * dist_per_segment
             + t1
         )
         b = (
-            torch.gather(dist_val_pred, 1, dist_segment_pred[:, None]).squeeze(1)
+            torch.gather(dist_val_pred, 1, dist_segment_pred[:, None]).squeeze(1) * dist_per_segment
             + dist_segment_pred * dist_per_segment
             + t1
         )
@@ -540,6 +574,9 @@ class Trainer:
 
     @torch.no_grad()
     def val(self):
+        # please don't remove it if you don't know why it is here
+        self.ds_val.shuffle()
+
         val_loss = 0
         val_acc = 0
         val_mse = 0
@@ -624,10 +661,16 @@ class Trainer:
 
     def get_results(self, n_epochs=3):
         results = {}
-        for i in range(n_epochs):
-            train_res = self.train()
-            val_res = self.val()
-            results[i] = {**train_res, **val_res}
+        for i in range(max(1, n_epochs)):
+            results[i] = dict()
+
+            if n_epochs > 0:
+                train_res = self.train()
+                results[i].update(train_res)
+
+                val_res = self.val()
+                results[i].update(val_res)
+
             cam_res = self.cam()
             results[i].update(cam_res)
             results[i]['enc_params'] = get_num_params(self.model.encoder)
@@ -641,18 +684,19 @@ def main(cfg):
     trainer = Trainer(cfg, tqdm_leave=True)
 
     point_encoder = NPointEncoder(N=32, sphere_radius=cfg.sphere_radius)
-    encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=20, finest_resolution=512)
+    # encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=22, finest_resolution=256)
+    encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=2048) # rank = None
     # encoder = SinEncoder(8, 1)
     # encoder = None
-    net = MLPNet(256, 8, use_tcnn=True)
-    # net = TransformerNet(24, 6, 32, use_tcnn=True, attn=True, norm=True)
+    net = MLPNet(128, 6, use_tcnn=True)
+    # net = TransformerNet(24, 3, 32, use_tcnn=True, attn=False, norm=True)
     model = Model(point_encoder, encoder, net).cuda()
 
     # model = BinSearchModel(cfg, encoder, 256, 8).cuda()
 
-    # name = 'mlp_d256_l8_p16_hg20'
+    name = 'hg18_rg2048_res256'
     # name = 'att_d24_l3_p32_hg20'
-    name = "exp4"
+    # name = "ex4"
     trainer.set_model(model, name)
     trainer.cam()
     results = trainer.get_results(10)
@@ -665,3 +709,17 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("Stopping...")
         exit()
+
+
+"""
+
+hg18_rg256_res256: 4.7 MB
+hg22_rg256_res256: 11 MB
+hg18_rg64_res256: 1.3 MB
+hg18_rg128_res256: 2.4 MB
+hg18_rg2048_res256: 36 MB
+
+hg18_rg0_res256: 5.6 MB
+hg14_rg0_res256: 0.7 MB
+
+"""
