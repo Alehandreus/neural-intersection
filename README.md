@@ -24,7 +24,7 @@ Update `config/raytrace.yaml` and run training with `python main.py -cn raytrace
 
 ## Notable Requirements
 - [tiny-cuda-nn](https://github.com/NVlabs/tiny-cuda-nn): `pip install git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch`
-- [trimesh](https://trimesh.org/) with Embree
+- [trimesh](https://trimesh.org/) with Embree: `pacman -S embree`, `pip install trimesh embreex`
 
 ## Ideas
 - [x] **MLP Model**: fast
