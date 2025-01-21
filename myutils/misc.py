@@ -44,6 +44,7 @@ class MetricLogger:
 
 
 def get_num_params(model):
+    if model is None: return 0
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 

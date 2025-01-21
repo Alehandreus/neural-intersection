@@ -7,6 +7,7 @@ from torch import nn
 from torch.nn import functional as F
 from tqdm import tqdm
 import tinycudann as tcnn
+from bvh import BVH
 
 from mydata import BlenderDataset, RayTraceDataset
 from timm.models.vision_transformer import Block
@@ -95,7 +96,7 @@ class AttentionPooling(nn.Module):
 
 
 class NPointEncoder(nn.Module):
-    def __init__(self, N=2, sphere_center=(0, 0, 0), sphere_radius=1):
+    def __init__(self, cfg, N=2, sphere_center=(0, 0, 0), sphere_radius=1):
         super().__init__()
         self.sphere_center = nn.Parameter(
             torch.tensor(sphere_center), requires_grad=False
@@ -123,6 +124,36 @@ class NPointEncoder(nn.Module):
         x = x.reshape(x.shape[0], -1)
         x = x / self.sphere_radius
         return x, mask, t1, t2
+    
+
+class BVHEncoder(nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
+
+        self.bvh = BVH()
+        self.bvh.load_scene(cfg.mesh_path)
+        self.bvh.build_bvh(10)
+        self.bvh.save_as_obj("bvh.obj")
+
+    def forward(self, x):
+        orig = x[..., :3]
+        vec = x[..., 3:] - x[..., :3]
+        vec = vec / vec.norm(dim=-1, keepdim=True)
+
+        orig = orig.cpu().numpy()
+        vec = vec.cpu().numpy()
+        mask, leaf_indices, t1, t2 = self.bvh.intersect_leaves(orig, vec)
+        orig = torch.tensor(orig, device="cuda", dtype=torch.float32)
+        vec = torch.tensor(vec, device="cuda", dtype=torch.float32)
+        mask = torch.tensor(mask, device="cuda", dtype=torch.bool)
+        t1 = torch.tensor(t1, device="cuda", dtype=torch.float32)
+        t2 = torch.tensor(t2, device="cuda", dtype=torch.float32)
+
+        x = torch.stack([orig + vec * t1[:, None], orig + vec * t2[:, None]], dim=1)
+        x = x.reshape(x.shape[0], -1)
+        x = x / self.cfg.sphere_radius
+        return x, mask, t1[:, None], t2[:, None]
 
 
 class HashGridEncoder(nn.Module):
@@ -374,114 +405,6 @@ class MLPNet(nn.Module):
         if acc.item() > 0.80:
             loss = loss + mse / 100
         return loss, acc, mse
-    
-
-class BinSearchModel(nn.Module):
-    def __init__(self, cfg, encoder, dim, n_layers, n_iter=6):
-        super().__init__()
-
-        self.encoder = encoder
-        self.point_encoder = NPointEncoder(N=8, sphere_radius=cfg.sphere_radius)
-        self.dim = dim
-        self.n_layers = n_layers
-        self.n_iter = n_iter
-
-        self.net = nn.Sequential(
-            nn.LazyLinear(dim),
-            nn.ReLU(),
-            tcnn.Network(
-                dim,
-                dim,
-                {
-                    "otype": "CutlassMLP",
-                    "activation": "ReLU",
-                    "output_activation": "None",
-                    "n_neurons": dim,
-                    "n_hidden_layers": n_layers - 3,
-                },
-            ),
-        )
-
-        self.cls_global = nn.Linear(dim, 1)
-        self.cls = nn.Linear(dim, 1)
-        self.dist = nn.Sequential(
-            nn.Linear(dim, 1),
-            # nn.ReLU(),
-        )
-    
-    def get_loss(self, x, mask, dist):
-        points, bbox_mask, t1, t2 = self.point_encoder(x)
-        # first = points[:, :3].clone()
-        # second = points[:, 3:].clone()
-
-        # first_emb = self.encoder(first)
-        # second_emb = self.encoder(second)
-        points_emb = self.point_encoder(points)
-        y = self.net(points_emb).float()
-        cls_global_pred = self.cls_global(y)
-        cls_global_loss = F.binary_cross_entropy_with_logits(cls_global_pred, mask.float())
-        acc1 = ((cls_global_pred > 0) == mask).float().mean()
-
-        first_t = torch.rand((points.shape[0], 1), device="cuda") / 2
-        second_t = torch.rand((points.shape[0], 1), device="cuda") / 2 + 0.5
-
-        first = first + first_t * (second - first)
-        second = second + second_t * (second - first)
-
-        first_emb = self.encoder(first)
-        second_emb = self.encoder(second)
-
-        points_emb = torch.cat([first_emb, second_emb], dim=1)
-        y = self.net(points_emb).float()
-        cls_pred = self.cls(y)
-        dist_pred = self.dist(y) + t1 + first_t * (t2 - t1)
-
-        cls_true = dist > t1 + first_t * (t2 - t1) + 0.5 * (second_t - first_t) * (t2 - t1)
-        cls_loss = F.binary_cross_entropy_with_logits(cls_pred[mask], cls_true[mask].float())
-        dist_loss = F.mse_loss(dist_pred[mask], dist[mask])
-
-        acc2 = ((cls_pred > 0) == cls_true).float().mean()
-        mse = F.mse_loss(dist_pred[mask], dist[mask])
-        # mse = torch.tensor(0, device="cuda")
-        
-        loss = cls_global_loss
-        # if acc1.item() > 0.80:
-        #     loss = cls_global_loss + cls_loss + dist_loss / 100
-        
-        return loss, acc1, mse
-
-    def forward(self, x):
-        points, bbox_mask, t1, t2 = self.point_encoder(x)
-        first = points[:, :3].clone()
-        second = points[:, 3:].clone()
-        mid = (first + second) / 2
-
-        first_emb = self.encoder(first)
-        second_emb = self.encoder(second)
-        points_emb = torch.cat([first_emb, second_emb], dim=1)
-
-        y = self.net(points_emb).float()
-        cls_global = self.cls_global(y)
-
-        # for iter in range(self.n_iter - 1):
-        #     first_emb = self.encoder(first)
-        #     second_emb = self.encoder(second)
-        #     points_emb = torch.cat([first_emb, second_emb], dim=1)
-
-        #     y = self.net(points_emb).float()
-        #     if iter == 0: cls_global = self.cls_global(y)
-        #     cls = self.cls(y)
-
-        #     mask = (cls > 0).float()
-        #     first = mask * mid + (1 - mask) * first
-        #     second = mask * second + (1 - mask) * mid
-        #     mid = (first + second) / 2
-
-        dist = self.dist(y) + t1
-        dist[cls_global < 0] = 0
-        dist[cls_global >= 0] = 1
-    
-        return cls_global, dist
 
 
 class Model(nn.Module):
@@ -624,12 +547,8 @@ class Trainer:
             batch_size = points.shape[0]
 
             mask_pred, dist_pred = self.model(points)
-            img_mask_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = (
-                mask_pred
-            )
-            img_dist_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = (
-                dist_pred
-            )
+            img_mask_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = mask_pred
+            img_dist_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = dist_pred
             img_dist[batch_idx * batch_size : (batch_idx + 1) * batch_size] = dist
         torch.cuda.synchronize()
         finish = time.time()
@@ -645,9 +564,9 @@ class Trainer:
 
         fig, ax = plt.subplots(1, 2, figsize=(10, 5))
         ax[0].axis("off")
-        ax[0].imshow(img_dist[0].cpu().numpy())
+        ax[0].imshow(1 - img_dist[0].cpu().numpy(), cmap="cubehelix")
         ax[1].axis("off")
-        ax[1].imshow(img_dist_pred[0].cpu().numpy())
+        ax[1].imshow(1 - img_dist_pred[0].cpu().numpy(), cmap="cubehelix")
         plt.tight_layout()
         plt.savefig("fig.png")
         plt.clf()
@@ -683,20 +602,15 @@ def main(cfg):
     print(f"Loading data from {cfg.dataset_class}")
     trainer = Trainer(cfg, tqdm_leave=True)
 
-    point_encoder = NPointEncoder(N=32, sphere_radius=cfg.sphere_radius)
-    # encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=22, finest_resolution=256)
-    encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=2048) # rank = None
-    # encoder = SinEncoder(8, 1)
+    # point_encoder = NPointEncoder(cfg, N=32, sphere_radius=cfg.sphere_radius)
+    point_encoder = BVHEncoder(cfg)
+    encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=14, finest_resolution=256)
     # encoder = None
     net = MLPNet(128, 6, use_tcnn=True)
     # net = TransformerNet(24, 3, 32, use_tcnn=True, attn=False, norm=True)
     model = Model(point_encoder, encoder, net).cuda()
 
-    # model = BinSearchModel(cfg, encoder, 256, 8).cuda()
-
-    name = 'hg18_rg2048_res256'
-    # name = 'att_d24_l3_p32_hg20'
-    # name = "ex4"
+    name = "exp"
     trainer.set_model(model, name)
     trainer.cam()
     results = trainer.get_results(10)
@@ -709,17 +623,3 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("Stopping...")
         exit()
-
-
-"""
-
-hg18_rg256_res256: 4.7 MB
-hg22_rg256_res256: 11 MB
-hg18_rg64_res256: 1.3 MB
-hg18_rg128_res256: 2.4 MB
-hg18_rg2048_res256: 36 MB
-
-hg18_rg0_res256: 5.6 MB
-hg14_rg0_res256: 0.7 MB
-
-"""
