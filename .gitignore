@@ -3,3 +3,7 @@ trash
 *.png
 outputs
 __pycache__
+venv/
+tiny-cuda-nn/
+runs_lora/
+datasets/

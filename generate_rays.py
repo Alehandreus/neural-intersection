@@ -5,7 +5,7 @@ from myutils.ray import *
 
 
 def run_raytrace(mesh, origins, directions):
-    batch_size = 100000
+    batch_size = 10000
     n = origins.shape[0]
     distances = np.zeros((n, 1))
 

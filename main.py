@@ -194,6 +194,47 @@ class HashGridLoRAEncoder(nn.Module):
         x = x.reshape(*orig_shape[:-1], -1)
         return x    
 
+class TrainableAABB(nn.Module):
+    def __init__(self, vmin, vmax, feature_size):
+        super().__init__()
+        self.vmin = vmin
+        self.vmax = vmax
+        self.features = torch.nn.Parameter(torch.randn(8, feature_size))
+        self.masks = [torch.tensor([False, True] * 4, device="cuda"), torch.tensor([False, False, True, True] * 2, device="cuda"), torch.tensor([False] * 4 + [True] * 4, device="cuda")]
+
+    def intersect(self, ray_orig, ray_dir):
+        inv_dir = 1 / (ray_dir + 1e-6)
+
+        t_min = (self.vmin - ray_orig) * inv_dir
+        t_max = (self.vmax - ray_orig) * inv_dir
+
+        t1 = torch.minimum(t_min, t_max, )
+        t2 = torch.maximum(t_min, t_max)
+
+        t_near = torch.max(t1)
+        t_far = torch.min(t2)
+
+        center = ((t_near + t_far) / 2 * ray_dir + ray_orig)
+
+        return t_near, t_far, (center >= self.vmin).all() and (center <= self.vmax).all()
+
+    def bicubic(self, point):
+        coeffs = torch.ones((point.shape[0], 8), device="cuda")
+        for i in range(3):
+            #coeffs *= point[:, i] * self.masks[i] + (1 - point[:, i]) * ~self.masks[i]
+            coeffs[:, self.masks[i]] *= point[:, i].unsqueeze(1)
+            coeffs[:, ~self.masks[i]] *= (1 - point[:, i]).unsqueeze(1)
+        return torch.matmul(coeffs, self.features)
+
+    def forward(self, x):
+        origin = x[:, :3]
+        dir = x[:, 3:]
+        t_near, t_far = self.intersect(origin, dir)
+
+
+
+        p1, p2 =  origin + dir * t_near, origin + dir * t_far  
+        return torch.concat((self.bicubic(p1), self.bicubic(p2))), t_near, t_far
 
 class SinEncoder(nn.Module):
     def __init__(self, dim, factor=1):
@@ -680,14 +721,19 @@ class Trainer:
 
 @hydra.main(config_path="config", config_name="raytrace", version_base=None)
 def main(cfg):
+
+    #bbox = TrainableAABB(torch.tensor([-1, -2, -3]), torch.tensor([1, 2, 3]), 16)
+    #print(bbox.forward(torch.tensor([0, 0, 0, 0, 0, 1])))
+
     print(f"Loading data from {cfg.dataset_class}")
     trainer = Trainer(cfg, tqdm_leave=True)
 
-    point_encoder = NPointEncoder(N=32, sphere_radius=cfg.sphere_radius)
+    #point_encoder = NPointEncoder(N=32, sphere_radius=cfg.sphere_radius)
     # encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=22, finest_resolution=256)
-    encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=2048) # rank = None
+    # encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=2048) # rank = None
     # encoder = SinEncoder(8, 1)
-    # encoder = None
+    point_encoder = TrainableAABB(torch.tensor([-35, -38, -32], device="cuda"), torch.tensor([31, 28, 34], device="cuda"), 16)
+    encoder = None
     net = MLPNet(128, 6, use_tcnn=True)
     # net = TransformerNet(24, 3, 32, use_tcnn=True, attn=False, norm=True)
     model = Model(point_encoder, encoder, net).cuda()
