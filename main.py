@@ -199,7 +199,7 @@ class TrainableAABB(nn.Module):
         super().__init__()
         self.vmin = vmin
         self.vmax = vmax
-        self.features = torch.nn.Parameter(torch.randn(8, feature_size))
+        self.features = torch.nn.Parameter(torch.randn(8, feature_size))#(torch.arange(8 * 2, dtype=torch.float).reshape(8, 2))
         self.masks = [torch.tensor([False, True] * 4, device="cuda"), torch.tensor([False, False, True, True] * 2, device="cuda"), torch.tensor([False] * 4 + [True] * 4, device="cuda")]
 
     def intersect(self, ray_orig, ray_dir):
@@ -208,15 +208,15 @@ class TrainableAABB(nn.Module):
         t_min = (self.vmin - ray_orig) * inv_dir
         t_max = (self.vmax - ray_orig) * inv_dir
 
-        t1 = torch.minimum(t_min, t_max, )
+        t1 = torch.minimum(t_min, t_max)
         t2 = torch.maximum(t_min, t_max)
 
-        t_near = torch.max(t1)
-        t_far = torch.min(t2)
+        t_near = torch.max(t1, dim=1).values.unsqueeze(1)
+        t_far = torch.min(t2, dim=1).values.unsqueeze(1)
 
         center = ((t_near + t_far) / 2 * ray_dir + ray_orig)
 
-        return t_near, t_far, (center >= self.vmin).all() and (center <= self.vmax).all()
+        return t_near, t_far, torch.logical_and((center >= self.vmin).all(dim=1), (center <= self.vmax).all(dim=1))
 
     def bicubic(self, point):
         coeffs = torch.ones((point.shape[0], 8), device="cuda")
@@ -229,12 +229,11 @@ class TrainableAABB(nn.Module):
     def forward(self, x):
         origin = x[:, :3]
         dir = x[:, 3:]
-        t_near, t_far = self.intersect(origin, dir)
+        t_near, t_far, mask = self.intersect(origin, dir)
 
-
-
-        p1, p2 =  origin + dir * t_near, origin + dir * t_far  
-        return torch.concat((self.bicubic(p1), self.bicubic(p2))), t_near, t_far
+        p1, p2 = origin + dir * t_near, origin + dir * t_far  
+        p1, p2 = (p1 - self.vmin) / (self.vmax - self.vmin), (p2 - self.vmin) / (self.vmax - self.vmin)
+        return torch.concat((self.bicubic(p1), self.bicubic(p2)), dim=1), mask, t_near, t_far
 
 class SinEncoder(nn.Module):
     def __init__(self, dim, factor=1):
@@ -722,8 +721,8 @@ class Trainer:
 @hydra.main(config_path="config", config_name="raytrace", version_base=None)
 def main(cfg):
 
-    #bbox = TrainableAABB(torch.tensor([-1, -2, -3]), torch.tensor([1, 2, 3]), 16)
-    #print(bbox.forward(torch.tensor([0, 0, 0, 0, 0, 1])))
+    bbox = TrainableAABB(torch.tensor([-1, -1, -1], device="cuda"), torch.tensor([1, 1, 1], device="cuda"), 16).cuda()
+    print(bbox.forward(torch.tensor([[0, 0, 0, 0, 0, 1]], device="cuda")))
 
     print(f"Loading data from {cfg.dataset_class}")
     trainer = Trainer(cfg, tqdm_leave=True)
