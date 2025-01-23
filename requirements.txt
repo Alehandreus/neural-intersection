@@ -1,0 +1,16 @@
+torch
+torchvision
+hydra-core
+numpy
+tqdm
+matplotlib
+trimesh
+embreex
+scipy
+imageio
+timm
+tensorboard
+termcolor
+pybind11
+#git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
+git+https://github.com/Alehandreus/bvh

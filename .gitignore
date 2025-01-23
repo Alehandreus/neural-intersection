@@ -1,9 +1,12 @@
 datasets/lego
 trash
 *.png
+*.obj
 outputs
 __pycache__
 venv/
 tiny-cuda-nn/
+bvh/
 runs_lora/
+runs5/
 datasets/
