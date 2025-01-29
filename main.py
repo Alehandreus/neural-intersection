@@ -7,6 +7,7 @@ from torch import nn
 from torch.nn import functional as F
 from tqdm import tqdm
 import tinycudann as tcnn
+from bvh import BVH
 
 from mydata import BlenderDataset, RayTraceDataset
 from myutils.modules import TransformerBlock, AttentionPooling, MeanPooling
@@ -259,6 +260,71 @@ class Model(nn.Module):
         cls[~bbox_mask] = -1
         dist[~bbox_mask] = 0
         return cls, dist
+    
+
+class BVHModel(nn.Module):
+    def __init__(self, cfg, n_points, encoder, net):
+        super().__init__()
+        self.n_points = n_points # number of points to sample in between
+        self.encoder = encoder
+        self.net = net
+
+        self.sphere_center = nn.Parameter(torch.tensor([0, 0, 0]), requires_grad=False)
+        self.sphere_radius = cfg.sphere_radius
+
+        self.bvh = BVH()
+        self.bvh.load_scene(cfg.mesh_path)
+        self.bvh.build_bvh(15)
+        self.bvh.save_as_obj("bvh.obj")
+        self.stack_depth = 20
+
+    def encode_points(self, x):
+        n_rays = x.shape[0]
+
+        orig = x[..., :3]
+        vec = x[..., 3:] - x[..., :3]
+        vec = vec / vec.norm(dim=-1, keepdim=True)
+
+        orig = orig.cpu().numpy()
+        orig = np.ascontiguousarray(orig, dtype=np.float32)
+        vec = vec.cpu().numpy()
+        vec = np.ascontiguousarray(vec, dtype=np.float32)
+        stack_size = np.ones((n_rays,), dtype=np.int32)
+        stack = np.zeros((n_rays, self.stack_depth), dtype=np.uint32)
+
+        mask, leaf_indices, t1, t2 = self.bvh.intersect_leaves(orig, vec, stack_size, stack)
+
+        orig = torch.tensor(orig, device="cuda", dtype=torch.float32)
+        vec = torch.tensor(vec, device="cuda", dtype=torch.float32)
+        mask = torch.tensor(mask, device="cuda", dtype=torch.bool)
+        t1 = torch.tensor(t1, device="cuda", dtype=torch.float32)[:, None]
+        t2 = torch.tensor(t2, device="cuda", dtype=torch.float32)[:, None]
+
+        orig = orig + vec * t1
+        vec = vec * (t2 - t1)
+        ts = torch.linspace(0, 1, self.n_points, device="cuda")
+        x = orig[..., None, :] + vec[..., None, :] * ts[None, :, None]
+
+        x = x.reshape(x.shape[0], -1)
+        x = x / self.sphere_radius
+
+        if self.encoder:
+            x = self.encoder(x)
+
+        return x, mask, t1, t2
+
+    def get_loss(self, x, mask, dist):
+        x, bbox_mask, t1, t2 = self.encode_points(x)
+        return self.net.get_loss(x, t1, t2, bbox_mask, mask, dist)
+
+    def forward(self, x):
+        x, bbox_mask, t1, t2 = self.encode_points(x)
+        cls, dist = self.net(x, t1, t2, bbox_mask)
+        # cls[bbox_mask] = 1
+        cls[~bbox_mask] = -1
+        # dist[bbox_mask] = 1
+        dist[~bbox_mask] = 0
+        return cls, dist
 
 
 class Trainer:
@@ -433,15 +499,17 @@ def main(cfg):
     print(f"Loading data from {cfg.dataset_class}")
     trainer = Trainer(cfg, tqdm_leave=True)
 
-    # point_encoder = NPointEncoder(cfg, N=32, sphere_radius=cfg.sphere_radius)
-    # point_encoder = BVHPointEncoder(cfg)
-    # print("Num bvh nodes:", point_encoder.bvh.n_nodes())
+    n_points = 32
+
     encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256)
     # encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=64) # rank = None
     # encoder = None
-    # net = MLPNet(128, 6, use_tcnn=True, norm=True)
-    net = TransformerNet(24, 3, 32, use_tcnn=True, attn=True, norm=True)
-    model = Model(cfg, 32, encoder, net).cuda()
+
+    net = MLPNet(128, 6, use_tcnn=True, norm=False)
+    # net = TransformerNet(24, 3, n_points, use_tcnn=True, attn=True, norm=True)
+
+    # model = Model(cfg, n_points, encoder, net).cuda()
+    model = BVHModel(cfg, n_points, encoder, net).cuda()
 
     name = "exp"
     trainer.set_model(model, name)
