@@ -7,153 +7,17 @@ from torch import nn
 from torch.nn import functional as F
 from tqdm import tqdm
 import tinycudann as tcnn
-from bvh import BVH
 
 from mydata import BlenderDataset, RayTraceDataset
-from timm.models.vision_transformer import Block
-from myutils import hashgrid
+from myutils.modules import TransformerBlock, AttentionPooling, MeanPooling
 from myutils.misc import *
 from myutils.ray import *
-import os
 import time
-import json
 
 from torch.utils.tensorboard import SummaryWriter
 
-from timm.models.vision_transformer import Attention
-from termcolor import colored
-
 
 torch.set_float32_matmul_precision("high")
-
-
-class TransformerBlock(nn.Module):
-    def __init__(self, dim, attn=True, norm=True, use_tcnn=True):
-        super().__init__()
-        self.attn = attn
-        self.norm = norm
-        self.use_tcnn = use_tcnn
-
-        self.attention = Attention(dim, num_heads=1) if attn else nn.Identity()
-        self.norm1 = nn.LayerNorm(dim) if norm else nn.Identity()
-        self.norm2 = nn.LayerNorm(dim) if norm else nn.Identity()
-
-        self.ff = tcnn.Network(dim, dim, {
-            "otype": "CutlassMLP",
-            "activation": "ReLU",
-            "output_activation": "None",
-            "n_neurons": dim,
-            "n_hidden_layers": 6 - 2,
-        }) if use_tcnn else nn.Sequential(
-            nn.Linear(dim, dim),
-            nn.ReLU(),
-            nn.Linear(dim, dim),
-            nn.ReLU(),
-            nn.Linear(dim, dim),
-            nn.ReLU(),
-            nn.Linear(dim, dim),
-            nn.ReLU(),
-            nn.Linear(dim, dim),
-            nn.ReLU(),
-            nn.Linear(dim, dim),
-        )
-
-    def forward(self, x):
-        n, s, d = x.shape
-
-        if self.attn:
-            x = x + self.attention(x)
-
-            if self.norm:
-                x = self.norm1(x)
-
-        x = x.reshape(n * s, d)
-        x = x + self.ff(x).float()
-        x = x.reshape(n, s, d)
-
-        if self.norm:
-            x = self.norm2(x)
-
-        return x
-
-class AttentionPooling(nn.Module):
-    def __init__(self, embedding_size):
-        super().__init__()
-        self.attn = nn.Sequential(
-            nn.Linear(embedding_size, embedding_size),
-            nn.LayerNorm(embedding_size),
-            nn.GELU(),
-            nn.Linear(embedding_size, 1),
-        )
-
-    def forward(self, x):
-        attn_logits = self.attn(x)
-        attn_weights = torch.softmax(attn_logits, dim=1)
-        x = x * attn_weights
-        x = x.sum(dim=1)
-        # x = x.mean(dim=1)
-        return x
-
-
-class NPointEncoder(nn.Module):
-    def __init__(self, cfg, N=2, sphere_center=(0, 0, 0), sphere_radius=1):
-        super().__init__()
-        self.sphere_center = nn.Parameter(
-            torch.tensor(sphere_center), requires_grad=False
-        )
-        self.sphere_radius = sphere_radius
-        self.N = N
-        self.t = nn.Parameter(torch.linspace(0, 1, N), requires_grad=False)
-
-    def forward(self, x):
-        orig = x[..., :3]
-        vec = x[..., 3:] - x[..., :3]
-        vec = vec / vec.norm(dim=-1, keepdim=True)
-
-        t1, t2, mask = to_sphere_torch(
-            orig,
-            vec,
-            self.sphere_center,
-            self.sphere_radius,
-        )
-
-        orig = orig + vec * t1
-        vec = vec * (t2 - t1)
-
-        x = orig[..., None, :] + vec[..., None, :] * self.t[None, :, None]
-        x = x.reshape(x.shape[0], -1)
-        x = x / self.sphere_radius
-        return x, mask, t1, t2
-    
-
-class BVHEncoder(nn.Module):
-    def __init__(self, cfg):
-        super().__init__()
-        self.cfg = cfg
-
-        self.bvh = BVH()
-        self.bvh.load_scene(cfg.mesh_path)
-        self.bvh.build_bvh(10)
-        self.bvh.save_as_obj("bvh.obj")
-
-    def forward(self, x):
-        orig = x[..., :3]
-        vec = x[..., 3:] - x[..., :3]
-        vec = vec / vec.norm(dim=-1, keepdim=True)
-
-        orig = orig.cpu().numpy()
-        vec = vec.cpu().numpy()
-        mask, leaf_indices, t1, t2 = self.bvh.intersect_leaves(orig, vec)
-        orig = torch.tensor(orig, device="cuda", dtype=torch.float32)
-        vec = torch.tensor(vec, device="cuda", dtype=torch.float32)
-        mask = torch.tensor(mask, device="cuda", dtype=torch.bool)
-        t1 = torch.tensor(t1, device="cuda", dtype=torch.float32)
-        t2 = torch.tensor(t2, device="cuda", dtype=torch.float32)
-
-        x = torch.stack([orig + vec * t1[:, None], orig + vec * t2[:, None]], dim=1)
-        x = x.reshape(x.shape[0], -1)
-        x = x / self.cfg.sphere_radius
-        return x, mask, t1[:, None], t2[:, None]
 
 
 class HashGridEncoder(nn.Module):
@@ -183,62 +47,13 @@ class HashGridEncoder(nn.Module):
         self.enc = tcnn.Encoding(self.input_dim, config)
         self.range = range
 
-    def forward(self, x):
+    def forward(self, x, **kwargs):
         x = (x + self.range) / (2 * self.range)
         orig_shape = x.shape
         x = x.reshape(-1, self.input_dim)
         x = self.enc(x).float()
         x = x.reshape(*orig_shape[:-1], -1)
-        return x
-    
-
-class HashGridLoRAEncoder(nn.Module):
-    def __init__(
-        self,
-        range,
-        dim=3,
-        n_levels=16,
-        n_features_per_level=2,
-        log2_hashmap_size=15,
-        base_resolution=16,
-        finest_resolution=512,
-        rank=None,
-    ):
-        super().__init__()
-        self.input_dim = dim
-        self.enc = hashgrid.MultiResHashGrid(
-            dim=dim,
-            n_levels=n_levels,
-            n_features_per_level=n_features_per_level,
-            log2_hashmap_size=log2_hashmap_size,
-            base_resolution=base_resolution,
-            finest_resolution=finest_resolution,
-            rank=rank,
-        )
-        self.range = range
-
-    def forward(self, x):
-        x = (x + self.range) / (2 * self.range)
-        orig_shape = x.shape
-        x = x.reshape(-1, self.input_dim)
-        x = self.enc(x).float()
-        x = x.reshape(*orig_shape[:-1], -1)
-        return x    
-
-
-class SinEncoder(nn.Module):
-    def __init__(self, dim, factor=1):
-        super().__init__()
-        self.dim = dim
-        self.factor = factor
-        self.out_dim = 3 * (1 + dim * 2)
-
-    def forward(self, x):
-        res = [x]
-        for i in range(self.dim):
-            res.append(torch.sin((x / self.factor) * 2**i))
-            res.append(torch.cos((x / self.factor) * 2**i))
-        return torch.cat(res, dim=-1)
+        return x  
 
 
 class TransformerNet(nn.Module):
@@ -270,13 +85,13 @@ class TransformerNet(nn.Module):
             })
 
         self.cls = nn.Sequential(
-            AttentionPooling(self.dim),
+            AttentionPooling(self.dim) if attn else MeanPooling(),
             nn.Linear(self.dim, 1),
         )
         self.dist_cls = nn.Linear(self.dim, 1)
         self.dist_val = nn.Linear(self.dim, 1)
         self.dist = nn.Sequential(
-            AttentionPooling(self.dim),
+            AttentionPooling(self.dim) if attn else MeanPooling(),
             nn.Linear(self.dim, 1),
         )
 
@@ -304,11 +119,6 @@ class TransformerNet(nn.Module):
             ],
             dim=-1,
         )
-
-        # k = 8
-        # y = x.reshape(x.shape[0], self.n_points // k, -1)
-        # x_ext = torch.cat([x, torch.zeros(x.shape[0], 1, x.shape[2], device="cuda")], dim=1)
-        # y = torch.cat([y, x_ext[:, k::k, :]], dim=-1)
 
         y = self.up(y)
         if self.attn or self.norm or not self.use_tcnn:
@@ -362,10 +172,10 @@ class TransformerNet(nn.Module):
 
 
 class MLPNet(nn.Module):
-    def __init__(self, dim, n_layers, use_tcnn=True):
+    def __init__(self, dim, n_layers, use_tcnn=True, norm=False):
         super().__init__()
 
-        if use_tcnn:
+        if use_tcnn and not norm:
             self.net = nn.Sequential(
                 nn.LazyLinear(dim),
                 nn.ReLU(),
@@ -382,6 +192,8 @@ class MLPNet(nn.Module):
             for _ in range(n_layers - 1):
                 self.net.append(nn.ReLU())
                 self.net.append(nn.Linear(dim, dim))
+                if norm:
+                    self.net.append(nn.LayerNorm(dim))
             self.net = nn.Sequential(*self.net)                
 
         self.cls = nn.Linear(dim, 1)
@@ -408,22 +220,41 @@ class MLPNet(nn.Module):
 
 
 class Model(nn.Module):
-    def __init__(self, point_encoder, encoder, net, compile=False):
+    def __init__(self, cfg, n_points, encoder, net):
         super().__init__()
-        self.point_encoder = point_encoder
+        self.n_points = n_points # number of points to sample in between
         self.encoder = encoder
         self.net = net
 
-    def get_loss(self, x, mask, dist):
-        x, bbox_mask, t1, t2 = self.point_encoder(x)
+        self.sphere_center = nn.Parameter(torch.tensor([0, 0, 0]), requires_grad=False)
+        self.sphere_radius = cfg.sphere_radius
+
+    def encode_points(self, x):
+        orig = x[..., :3]
+        vec = x[..., 3:] - x[..., :3]
+        vec = vec / vec.norm(dim=-1, keepdim=True)
+    
+        t1, t2, mask = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
+
+        orig = orig + vec * t1
+        vec = vec * (t2 - t1)
+        ts = torch.linspace(0, 1, self.n_points, device="cuda")
+        x = orig[..., None, :] + vec[..., None, :] * ts[None, :, None]
+
+        x = x.reshape(x.shape[0], -1)
+        x = x / self.sphere_radius
+
         if self.encoder:
             x = self.encoder(x)
+
+        return x, mask, t1, t2
+
+    def get_loss(self, x, mask, dist):
+        x, bbox_mask, t1, t2 = self.encode_points(x)
         return self.net.get_loss(x, t1, t2, bbox_mask, mask, dist)
 
     def forward(self, x):
-        x, bbox_mask, t1, t2 = self.point_encoder(x)
-        if self.encoder:
-            x = self.encoder(x)
+        x, bbox_mask, t1, t2 = self.encode_points(x)
         cls, dist = self.net(x, t1, t2, bbox_mask)
         cls[~bbox_mask] = -1
         dist[~bbox_mask] = 0
@@ -603,12 +434,14 @@ def main(cfg):
     trainer = Trainer(cfg, tqdm_leave=True)
 
     # point_encoder = NPointEncoder(cfg, N=32, sphere_radius=cfg.sphere_radius)
-    point_encoder = BVHEncoder(cfg)
-    encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=14, finest_resolution=256)
+    # point_encoder = BVHPointEncoder(cfg)
+    # print("Num bvh nodes:", point_encoder.bvh.n_nodes())
+    encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256)
+    # encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=64) # rank = None
     # encoder = None
-    net = MLPNet(128, 6, use_tcnn=True)
-    # net = TransformerNet(24, 3, 32, use_tcnn=True, attn=False, norm=True)
-    model = Model(point_encoder, encoder, net).cuda()
+    # net = MLPNet(128, 6, use_tcnn=True, norm=True)
+    net = TransformerNet(24, 3, 32, use_tcnn=True, attn=True, norm=True)
+    model = Model(cfg, 32, encoder, net).cuda()
 
     name = "exp"
     trainer.set_model(model, name)
