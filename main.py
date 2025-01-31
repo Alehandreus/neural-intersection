@@ -10,7 +10,7 @@ import tinycudann as tcnn
 from bvh import BVH
 
 from mydata import BlenderDataset, RayTraceDataset
-from myutils.modules import TransformerBlock, AttentionPooling, MeanPooling
+from myutils.modules import TransformerBlock, AttentionPooling, MeanPooling, HashGridLoRAEncoder
 from myutils.misc import *
 from myutils.ray import *
 import time
@@ -107,6 +107,7 @@ class TransformerNet(nn.Module):
             + dist_segment_pred * dist_per_segment
             + t1
         )
+        # b = dist_pred + t1
 
         return cls_pred, b
 
@@ -153,6 +154,8 @@ class TransformerNet(nn.Module):
             + dist_segment_pred * dist_per_segment
             + t1
         )
+        # a = dist_pred + t1
+        # b = dist_pred + t1
 
         cls_loss = F.binary_cross_entropy_with_logits(cls_pred, mask.float())
         dist_cls_loss = F.cross_entropy(
@@ -160,12 +163,12 @@ class TransformerNet(nn.Module):
         )
         dist_val_loss = F.mse_loss(a[mask], dist[mask])
 
-        acc1 = ((cls_pred > 0) == mask).float().mean()
-        acc2 = (dist_segment_pred[mask] == dist_segment[mask]).float().mean()
+        acc1 = ((cls_pred > 0) == mask).float().mean().item()
+        acc2 = (dist_segment_pred[mask] == dist_segment[mask]).float().mean().item()
         mse = F.mse_loss(b[mask], dist[mask])
         loss = cls_loss
 
-        if acc1.item() > 0.80:
+        if acc1 > 0.80:
             # loss = loss + dist_val_loss / 100
             loss = loss + dist_cls_loss + dist_val_loss / 100
 
@@ -213,9 +216,9 @@ class MLPNet(nn.Module):
         cls_loss = F.binary_cross_entropy_with_logits(cls_pred, mask.float())
 
         mse = F.mse_loss(dist_pred[mask], dist[mask])
-        acc = ((cls_pred > 0) == mask).float().mean()
+        acc = ((cls_pred > 0) == mask).float().mean().item()
         loss = cls_loss
-        if acc.item() > 0.80:
+        if acc > 0.80:
             loss = loss + mse / 100
         return loss, acc, mse
 
@@ -263,11 +266,11 @@ class Model(nn.Module):
     
 
 class BVHModel(nn.Module):
-    def __init__(self, cfg, n_points, encoder, net):
+    def __init__(self, cfg, n_points, encoder):
         super().__init__()
         self.n_points = n_points # number of points to sample in between
         self.encoder = encoder
-        self.net = net
+        self.net = MLPNet(128, 6, use_tcnn=True, norm=False)
 
         self.sphere_center = nn.Parameter(torch.tensor([0, 0, 0]), requires_grad=False)
         self.sphere_radius = cfg.sphere_radius
@@ -278,53 +281,136 @@ class BVHModel(nn.Module):
         self.bvh.save_as_obj("bvh.obj")
         self.stack_depth = 20
 
-    def encode_points(self, x):
-        n_rays = x.shape[0]
+        self.n_iter = 0
+
+    def run_bvh(self, orig_np, vec_np, stack_size_np, stack_np):
+        mask, leaf_indices, t1, t2 = self.bvh.intersect_leaves(orig_np, vec_np, stack_size_np, stack_np, self.get_stack_depth())
+
+        mask = torch.tensor(mask, device="cuda", dtype=torch.bool)[:, None]
+        t1 = torch.tensor(t1, device="cuda", dtype=torch.float32)[:, None]
+        t2 = torch.tensor(t2, device="cuda", dtype=torch.float32)[:, None]
+
+        return mask, leaf_indices, t1, t2
+    
+    def get_stack_depth(self):
+        # if self.n_iter < 1000:
+        #     return 1
+        # if self.n_iter < 2000:
+        #     return 5
+        return 15
+
+    def get_loss(self, x, mask, dist):
+        self.n_iter += 1
 
         orig = x[..., :3]
         vec = x[..., 3:] - x[..., :3]
         vec = vec / vec.norm(dim=-1, keepdim=True)
 
-        orig = orig.cpu().numpy()
-        orig = np.ascontiguousarray(orig, dtype=np.float32)
-        vec = vec.cpu().numpy()
-        vec = np.ascontiguousarray(vec, dtype=np.float32)
-        stack_size = np.ones((n_rays,), dtype=np.int32)
-        stack = np.zeros((n_rays, self.stack_depth), dtype=np.uint32)
+        stack_size_np = np.ones((x.shape[0],), dtype=np.int32)
+        stack_np = np.zeros((x.shape[0], self.stack_depth), dtype=np.uint32)
+        orig_np = orig.cpu().numpy()
+        orig_np = np.ascontiguousarray(orig_np, dtype=np.float32)
+        vec_np = vec.cpu().numpy()
+        vec_np = np.ascontiguousarray(vec_np, dtype=np.float32)
 
-        mask, leaf_indices, t1, t2 = self.bvh.intersect_leaves(orig, vec, stack_size, stack)
+        n_active_rays = x.shape[0]
 
-        orig = torch.tensor(orig, device="cuda", dtype=torch.float32)
-        vec = torch.tensor(vec, device="cuda", dtype=torch.float32)
-        mask = torch.tensor(mask, device="cuda", dtype=torch.bool)
-        t1 = torch.tensor(t1, device="cuda", dtype=torch.float32)[:, None]
-        t2 = torch.tensor(t2, device="cuda", dtype=torch.float32)[:, None]
+        loss = torch.tensor(0, device="cuda", dtype=torch.float32)
+        acc_nom = 0
+        acc_denom = 0
+        cls_loss = torch.tensor(0, device="cuda", dtype=torch.float32)
+        mse_loss = torch.tensor(0, device="cuda", dtype=torch.float32)
 
-        orig = orig + vec * t1
-        vec = vec * (t2 - t1)
-        ts = torch.linspace(0, 1, self.n_points, device="cuda")
-        x = orig[..., None, :] + vec[..., None, :] * ts[None, :, None]
+        n_iter = 0
+        bbox_per_hit = torch.zeros((x.shape[0], 1), device="cuda", dtype=torch.float32)
 
-        x = x.reshape(x.shape[0], -1)
-        x = x / self.sphere_radius
+        while n_active_rays > 0:
+            bvh_mask, leaf_indices, t1, t2 = self.run_bvh(orig_np, vec_np, stack_size_np, stack_np)
+            n_active_rays = bvh_mask.sum().item()
 
-        if self.encoder:
-            x = self.encoder(x)
+            if n_active_rays == 0:
+                break
+            
+            import random
+            if n_iter == 0 or random.random() < 0.03:
+                true_cls = (dist > t1) & (dist < t2) & bvh_mask
+                bbox_per_hit += true_cls.float()
+                # print(t1[0].item(), t2[0].item(), dist[0].item())
+                # true_cls = bvh_mask
 
-        return x, mask, t1, t2
+                inp_orig = orig + vec * t1
+                inp_vec = vec * (t2 - t1)
+                ts = torch.linspace(0, 1, self.n_points, device="cuda")
+                inp = inp_orig[..., None, :] + inp_vec[..., None, :] * ts[None, :, None]
+                inp /= self.sphere_radius
+                if self.encoder: inp = self.encoder(inp)
+                inp = inp.reshape(inp.shape[0], -1)
 
-    def get_loss(self, x, mask, dist):
-        x, bbox_mask, t1, t2 = self.encode_points(x)
-        return self.net.get_loss(x, t1, t2, bbox_mask, mask, dist)
+                pred_cls, pred_dist = self.net(inp, t1, t2, None)
+
+                acc_nom += ((pred_cls > 0) == true_cls).sum().item()
+                acc_denom += true_cls.shape[0]
+
+                cls_loss += F.binary_cross_entropy_with_logits(
+                    pred_cls, true_cls.float(),
+                    weight=true_cls.float() * 100 + 1
+                )
+                mse_loss += F.mse_loss(pred_dist[true_cls], dist[true_cls]) if true_cls.sum() > 0 else torch.tensor(0, device="cuda", dtype=torch.float32)
+
+            # a = F.mse_loss(pred_dist[true_cls], dist[true_cls]) if true_cls.sum() > 0 else torch.tensor(0, device="cuda", dtype=torch.float32)
+            # if a.isnan().sum() > 0:
+            #     print(pred_dist.sum(), pred_cls.sum())
+
+            # n_active_rays = 0
+            n_iter += 1
+        
+        # print("n_iter:", n_iter)
+
+        # mse_loss[bbox_per_hit > 0] /= bbox_per_hit[bbox_per_hit > 0]
+
+        loss = cls_loss + mse_loss
+        acc = acc_nom / acc_denom if acc_denom > 0 else 0
+        return loss, acc, mse_loss
 
     def forward(self, x):
-        x, bbox_mask, t1, t2 = self.encode_points(x)
-        cls, dist = self.net(x, t1, t2, bbox_mask)
-        # cls[bbox_mask] = 1
-        cls[~bbox_mask] = -1
-        # dist[bbox_mask] = 1
-        dist[~bbox_mask] = 0
-        return cls, dist
+        orig = x[..., :3]
+        vec = x[..., 3:] - x[..., :3]
+
+        stack_size_np = np.ones((x.shape[0],), dtype=np.int32)
+        stack_np = np.zeros((x.shape[0], self.stack_depth), dtype=np.uint32)
+        orig_np = orig.cpu().numpy()
+        orig_np = np.ascontiguousarray(orig_np, dtype=np.float32)
+        vec_np = vec.cpu().numpy()
+        vec_np = np.ascontiguousarray(vec_np, dtype=np.float32)
+
+        n_active_rays = x.shape[0]
+        dist = torch.inf * torch.ones((x.shape[0], 1), device="cuda", dtype=torch.float32)
+
+        while n_active_rays > 0:
+            bvh_mask, leaf_indices, t1, t2 = self.run_bvh(orig_np, vec_np, stack_size_np, stack_np)
+            n_active_rays = bvh_mask.sum().item()
+
+            inp_orig = orig + vec * t1
+            inp_vec = vec * (t2 - t1)
+            ts = torch.linspace(0, 1, self.n_points, device="cuda")
+            inp = inp_orig[..., None, :] + inp_vec[..., None, :] * ts[None, :, None]
+            inp /= self.sphere_radius
+            if self.encoder: inp = self.encoder(inp)
+            inp = inp.reshape(inp.shape[0], -1)
+         
+            pred_cls, pred_dist = self.net(inp, t1, t2, None)
+            # print((pred_cls > 0).sum().item())
+            dist_update_mask = (pred_cls > 0) & (pred_dist < dist) & bvh_mask
+            dist[dist_update_mask] = pred_dist[dist_update_mask]
+
+            # dist_update_mask = (dist > t1) & bvh_mask
+            # dist[dist_update_mask] = t1[dist_update_mask]
+
+            # n_active_rays = 0
+
+        dist[dist == torch.inf] = 0
+
+        return dist > 0, dist
 
 
 class Trainer:
@@ -351,6 +437,12 @@ class Trainer:
 
         n_params = get_num_params(self.model)
         print(f"Model params: {n_params} ({n_params / 1e6:.3f}MB)")
+        if hasattr(self.model, "encoder"):
+            n_params = get_num_params(self.model.encoder)
+            print(f"Encoder params: {n_params} ({n_params / 1e6:.3f}MB)")
+        if hasattr(self.model, "net"):
+            n_params = get_num_params(self.model.net)
+            print(f"Net params: {n_params} ({n_params / 1e6:.3f}MB)")
 
         if name is None:
             name = f"{time.time()}"
@@ -374,7 +466,7 @@ class Trainer:
             self.optimizer.step()
 
             self.logger_loss.update(loss.item())
-            self.logger_acc.update(acc.item())
+            self.logger_acc.update(acc)
             self.logger_mse.update(mse.item())
 
             bar.set_description(f"loss: {self.logger_loss.ema():.3f}, acc: {self.logger_acc.ema():.3f}, mse: {self.logger_mse.ema():.3f}")
@@ -409,7 +501,7 @@ class Trainer:
             loss, acc, mse = self.model.get_loss(points, mask, dist)
 
             val_loss += loss.item()
-            val_acc += acc.item()
+            val_acc += acc
             val_mse += mse.item()
 
             bar.set_description(f"val_loss: {val_loss / (batch_idx + 1):.3f}, val_acc: {val_acc / (batch_idx + 1):.3f}, mse: {val_mse / (batch_idx + 1):.3f}")
@@ -461,9 +553,9 @@ class Trainer:
 
         fig, ax = plt.subplots(1, 2, figsize=(10, 5))
         ax[0].axis("off")
-        ax[0].imshow(1 - img_dist[0].cpu().numpy(), cmap="cubehelix")
+        ax[0].imshow(img_dist[0].cpu().numpy() ** 2, cmap="gray") # cubehelix
         ax[1].axis("off")
-        ax[1].imshow(1 - img_dist_pred[0].cpu().numpy(), cmap="cubehelix")
+        ax[1].imshow(img_dist_pred[0].cpu().numpy() ** 2, cmap="gray")
         plt.tight_layout()
         plt.savefig("fig.png")
         plt.clf()
@@ -499,21 +591,22 @@ def main(cfg):
     print(f"Loading data from {cfg.dataset_class}")
     trainer = Trainer(cfg, tqdm_leave=True)
 
-    n_points = 32
+    n_points = 8
 
-    encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256)
-    # encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=64) # rank = None
+    encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=512)
+    # encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=128)
     # encoder = None
 
-    net = MLPNet(128, 6, use_tcnn=True, norm=False)
+    # net = MLPNet(128, 6, use_tcnn=False, norm=True)
     # net = TransformerNet(24, 3, n_points, use_tcnn=True, attn=True, norm=True)
 
     # model = Model(cfg, n_points, encoder, net).cuda()
-    model = BVHModel(cfg, n_points, encoder, net).cuda()
+    model = BVHModel(cfg, n_points, encoder).cuda()
 
-    name = "exp"
+    name = "exp2"
     trainer.set_model(model, name)
     trainer.cam()
+    # exit()
     results = trainer.get_results(10)
     print(results)
 
