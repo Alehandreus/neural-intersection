@@ -12,5 +12,5 @@ timm
 tensorboard
 termcolor
 pybind11
-#git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
+git+https://github.com/NVlabs/tiny-cuda-nn/#subdirectory=bindings/torch
 git+https://github.com/Alehandreus/bvh

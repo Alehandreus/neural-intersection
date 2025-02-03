@@ -120,7 +120,7 @@ class RayTraceDataset(Dataset):
         if os.path.isfile(self.cfg.data_path):
             self.names = [self.cfg.data_path]
         else:
-            self.names = os.listdir(self.cfg.data_path)
+            self.names = sorted(os.listdir(self.cfg.data_path))
             self.names = [os.path.join(self.cfg.data_path, name) for name in self.names]
         self.cur_name = 0
         self.device = 'cpu'

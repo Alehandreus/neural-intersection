@@ -7,6 +7,5 @@ __pycache__
 venv/
 tiny-cuda-nn/
 bvh/
-runs_lora/
-runs5/
+runs*
 datasets/
