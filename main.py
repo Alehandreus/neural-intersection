@@ -264,6 +264,114 @@ class Model(nn.Module):
         dist[~bbox_mask] = 0
         return cls, dist
     
+class PRIFNet(nn.Module):
+    def __init__(self, dim, n_layers, use_tcnn=True, norm=False):
+        super().__init__()
+
+        if use_tcnn and not norm:
+            self.net = nn.Sequential(
+                nn.LazyLinear(dim),
+                nn.ReLU(),
+                tcnn.Network(dim, dim, {
+                    "otype": "CutlassMLP",
+                    "activation": "ReLU",
+                    "output_activation": "None",
+                    "n_neurons": dim,
+                    "n_hidden_layers": n_layers - 3,
+                }),
+            )
+        else:
+            self.net = [nn.LazyLinear(dim)]
+            for _ in range(n_layers - 1):
+                self.net.append(nn.ReLU())
+                self.net.append(nn.Linear(dim, dim))
+                if norm:
+                    self.net.append(nn.LayerNorm(dim))
+            self.net = nn.Sequential(*self.net)                
+
+        self.cls = nn.Linear(dim, 1)
+        self.dist = nn.Linear(dim, 1)
+
+    def forward(self, x, bbox_mask):
+        x = self.net(x).float()
+        cls = self.cls(x)
+        dist = self.dist(x)
+        return cls, dist
+
+    def get_loss(self, x, bbox_mask, mask, dist):
+        mask = mask & bbox_mask.unsqueeze(1)
+
+        cls_pred, dist_pred = self(x, bbox_mask)
+        cls_loss = F.binary_cross_entropy_with_logits(cls_pred, mask.float())
+
+        mse = F.mse_loss(dist_pred[mask], dist[mask])
+        acc = ((cls_pred > 0) == mask).float().mean().item()
+        loss = cls_loss
+        if acc > 0.80:
+            loss = loss + mse / 10000000
+        return loss, acc, mse
+    
+class PRIFEncoder(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, **kwargs):
+        origin = x[:, :3]
+        dir = nn.functional.normalize(x[:, 3:] - x[:, :3], dim=-1)
+        vect = torch.cross(dir, torch.cross(origin, dir, dim=-1), dim=-1)
+        res = torch.cat([vect, dir], dim=-1)
+        return res
+    
+class PRIFModel(nn.Module):
+    def __init__(self, cfg, encoder, net):
+        super().__init__()
+        self.encoder = encoder
+        self.net = net
+
+        self.sphere_center = nn.Parameter(torch.tensor([0, 0, 0]), requires_grad=False)
+        self.sphere_radius = cfg.sphere_radius
+
+    def encode_points(self, x):
+        orig = x[..., :3]
+        vec = x[..., 3:] - x[..., :3]
+        vec = vec / vec.norm(dim=-1, keepdim=True)
+    
+        t1, t2, mask = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
+
+        orig = orig + vec * t1
+        vec = vec * (t2 - t1)
+        ts = torch.linspace(0, 1, 2, device="cuda")
+        x = orig[..., None, :] + vec[..., None, :] * ts[None, :, None]
+
+        x = x.reshape(x.shape[0], -1)
+        x = x / self.sphere_radius
+
+        if self.encoder:
+            x = self.encoder(x)
+
+        return x, mask, t1, t2
+
+    def get_loss(self, x, mask, dist):
+        orig = x[..., :3]
+        vec = x[..., 3:] - x[..., :3]
+        vec = vec / vec.norm(dim=-1, keepdim=True)
+        hit = orig + vec * dist
+        x, bbox_mask, t1, t2 = self.encode_points(x)
+        label = (hit[..., 0] - x[..., 0]) / vec[..., 0]
+        return self.net.get_loss(x, bbox_mask, mask, label[..., None])
+
+    def forward(self, x):
+        orig = x[..., :3]
+        vec = x[..., 3:] - x[..., :3]
+        vec = vec / vec.norm(dim=-1, keepdim=True)
+        x, bbox_mask, t1, t2 = self.encode_points(x)
+        cls, dist = self.net(x, bbox_mask)
+        hit = dist * vec + x[..., :3]
+        real_dist = (hit - orig).norm(dim=-1, keepdim=True)
+        cls[~bbox_mask] = -1
+        dist[~bbox_mask] = 0
+        return cls, real_dist
+    
 
 class BVHModel(nn.Module):
     def __init__(self, cfg, n_points, encoder):
@@ -597,7 +705,8 @@ def main(cfg):
 
     n_points = 32
 
-    encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=512)
+    encoder = PRIFEncoder()
+    # encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=512)
     # encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=128)
     # encoder = None
 
@@ -605,7 +714,11 @@ def main(cfg):
     # net = TransformerNet(24, 3, n_points, use_tcnn=True, attn=True, norm=True)
 
     # model = Model(cfg, n_points, encoder, net).cuda()
-    model = BVHModel(cfg, n_points, encoder).cuda()
+    # model = BVHModel(cfg, n_points, encoder).cuda()
+    
+    net = PRIFNet(128, 6, use_tcnn=False, norm=True)
+    
+    model = PRIFModel(cfg, encoder, net).cuda()
 
     name = "exp2"
     trainer.set_model(model, name)
