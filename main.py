@@ -322,6 +322,28 @@ class PRIFEncoder(nn.Module):
         res = torch.cat([vect, dir], dim=-1)
         return res
     
+class HashPRIFEncoder(nn.Module): # just for fun
+    def __init__(
+        self,
+        range,
+        n_levels=16,
+        n_features_per_level=2,
+        log2_hashmap_size=15,
+        base_resolution=16,
+        finest_resolution=512):
+        super().__init__()
+        self.hash_enc_1 = HashGridEncoder(range, 2, n_levels, n_features_per_level, log2_hashmap_size, base_resolution, finest_resolution)
+        self.hash_enc_2 = HashGridEncoder(range, 2, n_levels, n_features_per_level, log2_hashmap_size, base_resolution, finest_resolution)
+
+    def forward(self, x, **kwargs):
+        origin = x[:, :3]
+        dir = nn.functional.normalize(x[:, 3:] - x[:, :3], dim=-1)
+        hash_dir = self.hash_enc_1(coord2sph(dir))
+        vect = torch.cross(dir, torch.cross(origin, dir, dim=-1), dim=-1)
+        hash_vect = self.hash_enc_2(coord2sph(nn.functional.normalize(vect, dim=-1)))
+        res = torch.cat([vect, hash_dir, hash_vect], dim=-1)
+        return res
+    
 class PRIFModel(nn.Module):
     def __init__(self, cfg, encoder, net):
         super().__init__()
@@ -697,7 +719,7 @@ def main(cfg):
 
     n_points = 32
 
-    encoder = PRIFEncoder()
+    encoder = HashPRIFEncoder(3)
     # encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=512)
     # encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=128)
     # encoder = None
@@ -708,7 +730,7 @@ def main(cfg):
     # model = Model(cfg, n_points, encoder, net).cuda()
     # model = BVHModel(cfg, n_points, encoder).cuda()
     
-    net = PRIFNet(512, 8, use_tcnn=True, norm=False)
+    net = PRIFNet(512, 8, use_tcnn=True, norm=True)
     
     model = PRIFModel(cfg, encoder, net).cuda()
 
