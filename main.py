@@ -308,7 +308,7 @@ class PRIFNet(nn.Module):
         acc = ((cls_pred > 0) == mask).float().mean().item()
         loss = cls_loss
         if acc > 0.80:
-            loss = loss + mse / 10000000
+            loss = loss + mse / 100
         return loss, acc, mse
     
 class PRIFEncoder(nn.Module):
@@ -337,14 +337,6 @@ class PRIFModel(nn.Module):
         vec = vec / vec.norm(dim=-1, keepdim=True)
     
         t1, t2, mask = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
-
-        orig = orig + vec * t1
-        vec = vec * (t2 - t1)
-        ts = torch.linspace(0, 1, 2, device="cuda")
-        x = orig[..., None, :] + vec[..., None, :] * ts[None, :, None]
-
-        x = x.reshape(x.shape[0], -1)
-        x = x / self.sphere_radius
 
         if self.encoder:
             x = self.encoder(x)
@@ -716,7 +708,7 @@ def main(cfg):
     # model = Model(cfg, n_points, encoder, net).cuda()
     # model = BVHModel(cfg, n_points, encoder).cuda()
     
-    net = PRIFNet(128, 6, use_tcnn=False, norm=True)
+    net = PRIFNet(512, 8, use_tcnn=True, norm=False)
     
     model = PRIFModel(cfg, encoder, net).cuda()
 
@@ -724,7 +716,7 @@ def main(cfg):
     trainer.set_model(model, name)
     trainer.cam()
     # exit()
-    results = trainer.get_results(10)
+    results = trainer.get_results(30)
     print(results)
 
 
