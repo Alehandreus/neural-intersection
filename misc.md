@@ -1,3 +1,4 @@
+# All these should be in `.gitignore`
 
 ## Ideas
 - [x] **MLP Model**: fast

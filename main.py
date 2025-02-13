@@ -57,13 +57,41 @@ class HashGridEncoder(nn.Module):
         return x  
 
 
-class TransformerNet(nn.Module):
-    def __init__(self, dim, n_layers, n_points, attn=True, norm=True, use_tcnn=True):
+class ModelWrapper(nn.Module):
+    def __init__(self, cfg, encoder, n_points=2):
         super().__init__()
+        self.encoder = encoder
+        self.sphere_center = nn.Parameter(torch.tensor([0, 0, 0]), requires_grad=False)
+        self.sphere_radius = cfg.sphere_radius
+        self.n_points = n_points
+    
+    def encode_points(self, x):
+        orig = x[..., :3]
+        vec = x[..., 3:] - x[..., :3]
+        vec = vec / vec.norm(dim=-1, keepdim=True)
+    
+        t1, t2, mask = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
+
+        orig = orig + vec * t1
+        vec = vec * (t2 - t1)
+        ts = torch.linspace(0, 1, self.n_points, device="cuda")
+        x = orig[..., None, :] + vec[..., None, :] * ts[None, :, None]
+
+        x = x.reshape(x.shape[0], -1)
+        x = x / self.sphere_radius
+
+        if self.encoder:
+            x = self.encoder(x)
+
+        return x, mask, t1, t2
+
+
+class TransformerModel(ModelWrapper):
+    def __init__(self, cfg, encoder, dim, n_layers, n_points, attn=True, norm=True, use_tcnn=True):
+        super().__init__(cfg, encoder, n_points)
 
         self.dim = dim
         self.n_layers = n_layers
-        self.n_points = n_points
 
         self.attn = attn
         self.norm = norm
@@ -95,21 +123,35 @@ class TransformerNet(nn.Module):
             AttentionPooling(self.dim) if attn else MeanPooling(),
             nn.Linear(self.dim, 1),
         )
+        self.net = nn.ModuleList([
+            self.up,
+            self.layers,
+            self.cls,
+            self.dist_cls,
+            self.dist_val,
+            self.dist,
+        ])
 
-    def forward(self, x, t1, t2, bbox_mask):
+        self.cuda()
+
+    def forward(self, points):
+        x, bbox_mask, t1, t2 = self.encode_points(points)
+
         cls_pred, dist_cls_pred, dist_val_pred, dist_pred = self.forward_features(x)
 
         dist_per_segment = (t2 - t1) / dist_val_pred.shape[1]
         dist_segment_pred = dist_cls_pred.argmax(dim=1)
 
-        b = (
+        dist = (
             torch.gather(dist_val_pred, 1, dist_segment_pred[:, None]).squeeze(1)
             + dist_segment_pred * dist_per_segment
             + t1
         )
-        # b = dist_pred + t1
+        # dist = dist_pred + t1
 
-        return cls_pred, b
+        cls_pred[~bbox_mask] = -1
+        dist[~bbox_mask] = 0
+        return cls_pred, dist
 
     def forward_features(self, x):
         x = x.reshape(x.shape[0], self.n_points, -1)
@@ -130,9 +172,17 @@ class TransformerNet(nn.Module):
             y = y.reshape(n * s, d)
             y = self.layers(y).float()
             y = y.reshape(n, s, d)
-        return self.cls(y), self.dist_cls(y), self.dist_val(y).clamp(0, 1), self.dist(y)
 
-    def get_loss(self, x, t1, t2, bbox_mask, mask, dist):
+        cls = self.cls(y)
+        dist_cls = self.dist_cls(y)
+        dist_val = self.dist_val(y).clamp(0, 1)
+        dist = self.dist(y)
+
+        return cls, dist_cls, dist_val, dist
+
+    def get_loss(self, points, mask, dist):
+        x, bbox_mask, t1, t2 = self.encode_points(points)
+
         mask = mask & bbox_mask.unsqueeze(1)
 
         cls_pred, dist_cls_pred, dist_val_pred, dist_pred = self.forward_features(x)
@@ -180,7 +230,7 @@ class MLPNet(nn.Module):
         super().__init__()
 
         if use_tcnn and not norm:
-            self.net = nn.Sequential(
+            self.layers = nn.Sequential(
                 nn.LazyLinear(dim),
                 nn.ReLU(),
                 tcnn.Network(dim, dim, {
@@ -192,19 +242,19 @@ class MLPNet(nn.Module):
                 }),
             )
         else:
-            self.net = [nn.LazyLinear(dim)]
+            self.layers = [nn.LazyLinear(dim)]
             for _ in range(n_layers - 1):
-                self.net.append(nn.ReLU())
-                self.net.append(nn.Linear(dim, dim))
+                self.layers.append(nn.ReLU())
+                self.layers.append(nn.Linear(dim, dim))
                 if norm:
-                    self.net.append(nn.LayerNorm(dim))
-            self.net = nn.Sequential(*self.net)                
+                    self.layers.append(nn.LayerNorm(dim))
+            self.layers = nn.Sequential(*self.layers)                
 
         self.cls = nn.Linear(dim, 1)
         self.dist = nn.Linear(dim, 1)
 
     def forward(self, x, t1, t2, bbox_mask):
-        x = self.net(x).float()
+        x = self.layers(x).float()
         cls = self.cls(x)
         dist = self.dist(x) + t1
         return cls, dist
@@ -223,47 +273,23 @@ class MLPNet(nn.Module):
         return loss, acc, mse
 
 
-class Model(nn.Module):
-    def __init__(self, cfg, n_points, encoder, net):
-        super().__init__()
-        self.n_points = n_points # number of points to sample in between
-        self.encoder = encoder
-        self.net = net
+class MLPModel(ModelWrapper):
+    def __init__(self, cfg, encoder, dim, n_layers, n_points, use_tcnn=True, norm=False):
+        super().__init__(cfg, encoder, n_points)
+        self.net = MLPNet(dim, n_layers, use_tcnn, norm)
+        self.cuda()
 
-        self.sphere_center = nn.Parameter(torch.tensor([0, 0, 0]), requires_grad=False)
-        self.sphere_radius = cfg.sphere_radius
-
-    def encode_points(self, x):
-        orig = x[..., :3]
-        vec = x[..., 3:] - x[..., :3]
-        vec = vec / vec.norm(dim=-1, keepdim=True)
-    
-        t1, t2, mask = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
-
-        orig = orig + vec * t1
-        vec = vec * (t2 - t1)
-        ts = torch.linspace(0, 1, self.n_points, device="cuda")
-        x = orig[..., None, :] + vec[..., None, :] * ts[None, :, None]
-
-        x = x.reshape(x.shape[0], -1)
-        x = x / self.sphere_radius
-
-        if self.encoder:
-            x = self.encoder(x)
-
-        return x, mask, t1, t2
-
-    def get_loss(self, x, mask, dist):
-        x, bbox_mask, t1, t2 = self.encode_points(x)
-        return self.net.get_loss(x, t1, t2, bbox_mask, mask, dist)
-
-    def forward(self, x):
-        x, bbox_mask, t1, t2 = self.encode_points(x)
+    def forward(self, points):
+        x, bbox_mask, t1, t2 = self.encode_points(points)
         cls, dist = self.net(x, t1, t2, bbox_mask)
         cls[~bbox_mask] = -1
         dist[~bbox_mask] = 0
         return cls, dist
-    
+
+    def get_loss(self, points, mask, dist):
+        x, bbox_mask, t1, t2 = self.encode_points(points)
+        return self.net.get_loss(x, t1, t2, bbox_mask, mask, dist)
+
 
 class BVHModel(nn.Module):
     def __init__(self, cfg, n_points, encoder):
@@ -277,14 +303,16 @@ class BVHModel(nn.Module):
 
         self.bvh = BVH()
         self.bvh.load_scene(cfg.mesh_path)
-        self.bvh.build_bvh(15)
+        self.bvh.build_bvh(5)
         self.bvh.save_as_obj("bvh.obj")
         self.stack_depth = 20
 
         self.n_iter = 0
 
+        self.cuda()
+
     def run_bvh(self, orig_np, vec_np, stack_size_np, stack_np):
-        mask, leaf_indices, t1, t2 = self.bvh.intersect_leaves(orig_np, vec_np, stack_size_np, stack_np, self.get_stack_depth())
+        mask, leaf_indices, t1, t2 = self.bvh.intersect_leaves(orig_np, vec_np, stack_size_np, stack_np)
 
         mask = torch.tensor(mask, device="cuda", dtype=torch.bool)[:, None]
         t1 = torch.tensor(t1, device="cuda", dtype=torch.float32)[:, None]
@@ -597,11 +625,9 @@ def main(cfg):
     # encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=128)
     # encoder = None
 
-    # net = MLPNet(128, 6, use_tcnn=False, norm=True)
-    # net = TransformerNet(24, 3, n_points, use_tcnn=True, attn=True, norm=True)
-
-    # model = Model(cfg, n_points, encoder, net).cuda()
-    model = BVHModel(cfg, n_points, encoder).cuda()
+    model = TransformerModel(cfg, encoder, 24, 3, n_points, use_tcnn=True, attn=True, norm=True)
+    # model = MLPModel(cfg, encoder, 128, 6, n_points, use_tcnn=True, norm=True)
+    # model = BVHModel(cfg, n_points, encoder)
 
     name = "exp2"
     trainer.set_model(model, name)
