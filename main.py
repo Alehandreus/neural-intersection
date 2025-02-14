@@ -87,7 +87,7 @@ class ModelWrapper(nn.Module):
 
 
 class TransformerModel(ModelWrapper):
-    def __init__(self, cfg, encoder, dim, n_layers, n_points, attn=True, norm=True, use_tcnn=True):
+    def __init__(self, cfg, encoder, dim, n_layers, n_points, attn=True, norm=True, use_tcnn=True, use_bvh=True):
         super().__init__(cfg, encoder, n_points)
 
         self.dim = dim
@@ -96,6 +96,7 @@ class TransformerModel(ModelWrapper):
         self.attn = attn
         self.norm = norm
         self.use_tcnn = use_tcnn
+        self.use_bvh = use_bvh
 
         self.up = nn.LazyLinear(self.dim)
 
@@ -132,12 +133,17 @@ class TransformerModel(ModelWrapper):
             self.dist,
         ])
 
+        if use_bvh:
+            self.bvh = BVH()
+            self.bvh.load_scene(cfg.mesh_path)
+            self.bvh.build_bvh(15)
+
         self.cuda()
 
     def forward(self, points):
         x, bbox_mask, t1, t2 = self.encode_points(points)
 
-        cls_pred, dist_cls_pred, dist_val_pred, dist_pred = self.forward_features(x)
+        cls_pred, dist_cls_pred, dist_val_pred, dist_pred = self.forward_features(x, points, t1, t2)
 
         dist_per_segment = (t2 - t1) / dist_val_pred.shape[1]
         dist_segment_pred = dist_cls_pred.argmax(dim=1)
@@ -153,7 +159,7 @@ class TransformerModel(ModelWrapper):
         dist[~bbox_mask] = 0
         return cls_pred, dist
 
-    def forward_features(self, x):
+    def forward_features(self, x, points, t1, t2):
         x = x.reshape(x.shape[0], self.n_points, -1)
 
         y = torch.cat(
@@ -178,6 +184,25 @@ class TransformerModel(ModelWrapper):
         dist_val = self.dist_val(y).clamp(0, 1)
         dist = self.dist(y)
 
+        if self.use_bvh:
+            orig = points[..., :3]
+            vec = points[..., 3:] - points[..., :3]
+            vec = vec / vec.norm(dim=-1, keepdim=True)
+
+            start = orig + vec * t1
+            start_np = np.ascontiguousarray(start.cpu().numpy(), dtype=np.float32)
+
+            end = orig + vec * t2
+            end_np = np.ascontiguousarray(end.cpu().numpy(), dtype=np.float32)
+
+            segments_bvh = self.bvh.intersect_segments(start_np, end_np, self.n_points - 1)
+
+            segments_bvh = torch.tensor(segments_bvh, device="cuda", dtype=torch.float32).unsqueeze(-1)
+
+            # print(segments_bvh[0, :, 0].cpu().numpy())
+
+            dist_cls = dist_cls * segments_bvh
+
         return cls, dist_cls, dist_val, dist
 
     def get_loss(self, points, mask, dist):
@@ -185,7 +210,7 @@ class TransformerModel(ModelWrapper):
 
         mask = mask & bbox_mask.unsqueeze(1)
 
-        cls_pred, dist_cls_pred, dist_val_pred, dist_pred = self.forward_features(x)
+        cls_pred, dist_cls_pred, dist_val_pred, dist_pred = self.forward_features(x, points, t1, t2)
 
         dist_adj = dist - t1
         dist_adj[~mask] = 0
@@ -193,6 +218,8 @@ class TransformerModel(ModelWrapper):
         dist_per_segment = (t2 - t1) / dist_val_pred.shape[1]
         dist_segment = (dist_adj / dist_per_segment).long()
         dist_segment_pred = dist_cls_pred.argmax(dim=1)
+
+        # print(dist_segment[0].cpu().numpy())
 
         a = (
             torch.gather(dist_val_pred, 1, dist_segment[:, None]).squeeze(1) * dist_per_segment
@@ -619,17 +646,17 @@ def main(cfg):
     print(f"Loading data from {cfg.dataset_class}")
     trainer = Trainer(cfg, tqdm_leave=True)
 
-    n_points = 8
+    n_points = 128
 
-    encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=512)
+    encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=14, finest_resolution=256)
     # encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=128)
     # encoder = None
 
-    model = TransformerModel(cfg, encoder, 24, 3, n_points, use_tcnn=True, attn=True, norm=True)
+    model = TransformerModel(cfg, encoder, 24, 3, n_points, use_tcnn=True, attn=False, norm=True)
     # model = MLPModel(cfg, encoder, 128, 6, n_points, use_tcnn=True, norm=True)
     # model = BVHModel(cfg, n_points, encoder)
 
-    name = "exp2"
+    name = "exp4"
     trainer.set_model(model, name)
     trainer.cam()
     # exit()
