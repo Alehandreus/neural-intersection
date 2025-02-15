@@ -9,16 +9,22 @@ from tqdm import tqdm
 import tinycudann as tcnn
 from bvh import BVH
 
-from mydata import BlenderDataset, RayTraceDataset
 from myutils.modules import TransformerBlock, AttentionPooling, MeanPooling, HashGridLoRAEncoder
 from myutils.misc import *
 from myutils.ray import *
-import time
 
-from torch.utils.tensorboard import SummaryWriter
+from trainer import Trainer
 
 
 torch.set_float32_matmul_precision("high")
+
+
+DEBUG = True
+DEBUG_PREF = "debug |"
+
+
+def print_debug(*args, **kwargs):
+    print(DEBUG_PREF, *args, **kwargs)
 
 
 class HashGridEncoder(nn.Module):
@@ -64,6 +70,7 @@ class ModelWrapper(nn.Module):
         self.sphere_center = nn.Parameter(torch.tensor([0, 0, 0]), requires_grad=False)
         self.sphere_radius = cfg.sphere_radius
         self.n_points = n_points
+        self.segment_length = (cfg.sphere_radius * 2) / n_points
     
     def encode_points(self, x):
         orig = x[..., :3]
@@ -73,7 +80,8 @@ class ModelWrapper(nn.Module):
         t1, t2, mask = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
 
         orig = orig + vec * t1
-        vec = vec * (t2 - t1)
+        # vec = vec * (t2 - t1)
+        vec = vec * self.segment_length * (self.n_points - 1)
         ts = torch.linspace(0, 1, self.n_points, device="cuda")
         x = orig[..., None, :] + vec[..., None, :] * ts[None, :, None]
 
@@ -86,13 +94,32 @@ class ModelWrapper(nn.Module):
         return x, mask, t1, t2
 
 
-class TransformerModel(ModelWrapper):
-    def __init__(self, cfg, encoder, dim, n_layers, n_points, attn=True, norm=True, use_tcnn=True, use_bvh=True):
-        super().__init__(cfg, encoder, n_points)
+class TransformerModel(nn.Module):
+    def __init__(self, cfg, encoder, dim, n_layers, n_points, attn=True, norm=True, use_tcnn=True, use_bvh=True, n_batch_split=10):
+        super().__init__()
 
+        self.cfg = cfg
+        self.sphere_center = nn.Parameter(torch.tensor([0, 0, 0]), requires_grad=False)
+        self.sphere_radius = cfg.sphere_radius
+        self.n_points = n_points
+        self.n_segments = n_points - 1
+        self.segment_length = (cfg.sphere_radius * 2) / self.n_segments
+        self.n_batch_split = n_batch_split
         self.dim = dim
         self.n_layers = n_layers
 
+        if use_bvh:
+            self.bvh = BVH()
+            self.bvh.load_scene(cfg.mesh_path)
+            self.bvh.build_bvh(15)
+
+        self.encoder = encoder
+
+        self.setup_net(dim, n_layers, attn, norm, use_tcnn, use_bvh)
+
+        self.cuda()
+
+    def setup_net(self, dim, n_layers, attn, norm, use_tcnn, use_bvh):
         self.attn = attn
         self.norm = norm
         self.use_tcnn = use_tcnn
@@ -114,7 +141,7 @@ class TransformerModel(ModelWrapper):
                 "n_hidden_layers": 6 * n_layers - 2,
             })
 
-        self.cls = nn.Sequential(
+        self.hit = nn.Sequential(
             AttentionPooling(self.dim) if attn else MeanPooling(),
             nn.Linear(self.dim, 1),
         )
@@ -127,129 +154,286 @@ class TransformerModel(ModelWrapper):
         self.net = nn.ModuleList([
             self.up,
             self.layers,
-            self.cls,
+            self.hit,
             self.dist_cls,
             self.dist_val,
             self.dist,
         ])
 
-        if use_bvh:
-            self.bvh = BVH()
-            self.bvh.load_scene(cfg.mesh_path)
-            self.bvh.build_bvh(15)
+    def generate_segments(self, orig, vec, t1, t2):
+        """
+        Generate segments for a ray, cut by sphere and BVH
 
-        self.cuda()
+        Args:
+            orig: (n_rays, 3) - ray origin
+            vec: (n_rays, 3) - normalized ray direction
+            t1: (n_rays,) - t value to put start point on the sphere
+            t2: (n_rays,) - t value to put end point on the sphere
 
-    def forward(self, points):
-        x, bbox_mask, t1, t2 = self.encode_points(points)
+        Returns:
+            segments: (n_rays, n_segments, 3) - segments of a ray shrinked and padded
+            segments_idx: (n_rays, n_segments) - indices of segments to unshrink
+            segments_idx_rev: (n_rays, n_segments) - indices of segments to shrink
+            n_segments_left: (n_rays,) - number of segments for each ray
+            segments_mask: (n_rays, n_segments) - mask for segments
+        """
 
-        cls_pred, dist_cls_pred, dist_val_pred, dist_pred = self.forward_features(x, points, t1, t2)
+        n_rays = orig.shape[0]
 
-        dist_per_segment = (t2 - t1) / dist_val_pred.shape[1]
-        dist_segment_pred = dist_cls_pred.argmax(dim=1)
+        # t value for each point on a ray to form segments
+        t_values = torch.linspace(0, 1, self.n_points, device="cuda") * self.segment_length * self.n_segments + t1[:, None]
 
-        dist = (
-            torch.gather(dist_val_pred, 1, dist_segment_pred[:, None]).squeeze(1)
-            + dist_segment_pred * dist_per_segment
-            + t1
-        )
-        # dist = dist_pred + t1
+        # filter segments outside the sphere
+        mask_t_values = t_values[:, :-1] < t2[:, None]
 
-        cls_pred[~bbox_mask] = -1
-        dist[~bbox_mask] = 0
-        return cls_pred, dist
-
-    def forward_features(self, x, points, t1, t2):
-        x = x.reshape(x.shape[0], self.n_points, -1)
-
-        y = torch.cat(
-            [
-                x[:, 1:],
-                x[:, :-1],
-            ],
-            dim=-1,
-        )
-
-        y = self.up(y)
-        if self.attn or self.norm or not self.use_tcnn:
-            y = self.layers(y)
-        else:
-            n, s, d = y.shape
-            y = y.reshape(n * s, d)
-            y = self.layers(y).float()
-            y = y.reshape(n, s, d)
-
-        cls = self.cls(y)
-        dist_cls = self.dist_cls(y)
-        dist_val = self.dist_val(y).clamp(0, 1)
-        dist = self.dist(y)
-
+        # fixed size segments filtered by BVH
+        mask_bvh = torch.ones((n_rays, self.n_points - 1), device="cuda", dtype=torch.bool)
         if self.use_bvh:
-            orig = points[..., :3]
-            vec = points[..., 3:] - points[..., :3]
-            vec = vec / vec.norm(dim=-1, keepdim=True)
+            bvh_start = orig + vec * t1[:, None]
+            bvh_end = orig + vec * t1[:, None] + vec * self.segment_length * self.n_segments
+            sphere_start_np = np.ascontiguousarray(bvh_start.cpu().numpy(), dtype=np.float32)
+            sphere_end_np = np.ascontiguousarray(bvh_end.cpu().numpy(), dtype=np.float32)
+            mask_bvh = self.bvh.intersect_segments(sphere_start_np, sphere_end_np, self.n_segments)
+            mask_bvh = torch.tensor(mask_bvh, device="cuda", dtype=torch.bool)
 
-            start = orig + vec * t1
-            start_np = np.ascontiguousarray(start.cpu().numpy(), dtype=np.float32)
+        # generate segments
+        points = orig[:, None, :] + vec[:, None, :] * t_values[:, :, None]
+        points = points / self.sphere_radius
+        segments = torch.cat([points[:, :-1], points[:, 1:]], dim=-1)
 
-            end = orig + vec * t2
-            end_np = np.ascontiguousarray(end.cpu().numpy(), dtype=np.float32)
+        # remove filtered segments, shrink and pad on the right
+        # mask_total = torch.ones((n_rays, self.n_points - 1), device="cuda", dtype=torch.bool)
+        mask_total = mask_t_values & mask_bvh
+        segments = shrink_batch(segments, mask_total)
 
-            segments_bvh = self.bvh.intersect_segments(start_np, end_np, self.n_points - 1)
+        segments_idx = torch.argsort(mask_total, dim=1, descending=True, stable=True) # indices to transform cut segments -> global segments
+        
+        segmends_idx_rev = torch.zeros_like(segments_idx)
+        segmends_idx_rev = torch.scatter(
+            torch.zeros_like(segments_idx),
+            1,
+            segments_idx,
+            torch.arange(self.n_segments, device="cuda").unsqueeze(0).expand(n_rays, -1),
+        )
 
-            segments_bvh = torch.tensor(segments_bvh, device="cuda", dtype=torch.float32).unsqueeze(-1)
+        return segments, segments_idx, segmends_idx_rev, mask_total.sum(dim=1), mask_total
+    
+    def encode_segments(self, segments):
+        n_rays = segments.shape[0]
 
-            # print(segments_bvh[0, :, 0].cpu().numpy())
+        segments_flat = segments.reshape(-1, 3)
+        segments_flat = self.encoder(segments_flat) # for some points it is called two times, TODO
+        segments = segments_flat.reshape((n_rays, self.n_segments, -1))
+        return segments
 
-            dist_cls = dist_cls * segments_bvh
+    def net_forward(self, segments):
+        """
+        Simply run the transformer network without sphere / BVH intersection hassle. 
+        Input - Output. Except for zeroing output for padded segments.
 
-        return cls, dist_cls, dist_val, dist
+        Args:
+            segments: (n_rays, n_segments, dim)
 
-    def get_loss(self, points, mask, dist):
-        x, bbox_mask, t1, t2 = self.encode_points(points)
+        Returns:
+            cls: (n_rays,) - binary mask prediction
+            dist_cls: (n_rays, n_segments,) - segment classification
+            dist_val: (n_rays, n_segments,) - segment distance prediction
+        """
 
-        mask = mask & bbox_mask.unsqueeze(1)
+        x = self.up(segments)
 
-        cls_pred, dist_cls_pred, dist_val_pred, dist_pred = self.forward_features(x, points, t1, t2)
+        if self.attn or self.norm or not self.use_tcnn:
+            x = self.layers(x)
+        else:
+            n, s, d = x.shape
+            x = x.reshape(n * s, d)
+            x = self.layers(x).float()
+            x = x.reshape(n, s, d)
 
-        dist_adj = dist - t1
-        dist_adj[~mask] = 0
+        hit = self.hit(x).squeeze(1)
+        dist_cls = self.dist_cls(x).squeeze(2)
+        dist_val = self.dist_val(x).clamp(0, 1).squeeze(2)
 
-        dist_per_segment = (t2 - t1) / dist_val_pred.shape[1]
-        dist_segment = (dist_adj / dist_per_segment).long()
-        dist_segment_pred = dist_cls_pred.argmax(dim=1)
+        return hit, dist_cls, dist_val
+    
+    def forward(self, points):
+        orig = points[..., :3]
+        vec = points[..., 3:] - points[..., :3]
+        vec = vec / vec.norm(dim=-1, keepdim=True)
 
-        # print(dist_segment[0].cpu().numpy())
+        # project to sphere, cut segments, run hashgrid, run transformer
+        t1, t2, mask_sphere = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
+        t1, t2 = t1.squeeze(1), t2.squeeze(1)
+        segments, segments_idx, segments_idx_rev, n_segments_left, segments_mask = self.generate_segments(orig, vec, t1, t2)
+        segments = self.encode_segments(segments)
+        # hit: global hit/miss prediction, cls: segment classification, val: segment distance prediction
+        hit_pred, cls_pred, val_pred = self.net_forward(segments)
+        # zero out cls for padded segments
+        cls_pred[~get_shrink_mask(segments_mask)] = float("-inf")
+        hit_pred[segments_mask.sum(dim=1) == 0] = -100 # should be float("-inf") but nan
 
-        a = (
-            torch.gather(dist_val_pred, 1, dist_segment[:, None]).squeeze(1) * dist_per_segment
-            + dist_segment * dist_per_segment
+        shrink_argmax_pred = cls_pred.argmax(dim=1) # (n_rays,)
+        global_argmax_pred = torch.gather(segments_idx, 1, shrink_argmax_pred[:, None]).squeeze(1) # (n_rays,)
+
+        dist_pred = (
+            torch.gather(val_pred, 1, shrink_argmax_pred[:, None]).squeeze(1)
+            + global_argmax_pred * self.segment_length
+            + t1
+        ) # (n_rays,)
+
+        return hit_pred, dist_pred
+
+    def get_loss(self, points, hit_mask, dist):
+        hit_mask = hit_mask.squeeze(1)
+        dist = dist.squeeze(1)
+
+        orig = points[..., :3]
+        vec = points[..., 3:] - points[..., :3]
+        vec = vec / vec.norm(dim=-1, keepdim=True)
+
+        # project to sphere, cut segments, run hashgrid, run transformer
+        t1, t2, mask_sphere = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
+        t1, t2 = t1.squeeze(1), t2.squeeze(1)
+        segments, segments_idx, segments_idx_rev, n_segments_left, segments_mask = self.generate_segments(orig, vec, t1, t2)
+
+        bvh_miss = segments_mask.sum(dim=1) == 0
+        orig = orig[~bvh_miss]
+        vec = vec[~bvh_miss]
+        t1 = t1[~bvh_miss]
+        t2 = t2[~bvh_miss]
+        segments = segments[~bvh_miss]
+        segments_idx = segments_idx[~bvh_miss]
+        segments_idx_rev = segments_idx_rev[~bvh_miss]
+        n_segments_left = n_segments_left[~bvh_miss]
+        segments_mask = segments_mask[~bvh_miss]
+        hit_mask = hit_mask[~bvh_miss]
+        dist = dist[~bvh_miss]
+
+        segments = self.encode_segments(segments)
+
+        frac = n_segments_left.sum().float() / (n_segments_left.shape[0] * self.n_segments)
+        max_length = n_segments_left.max().item()
+        # print(f"{frac=:.2f}, {max_length=}")
+
+        # hit_pred, cls_pred, val_pred = self.net_forward(segments, segments_mask)
+        
+        self.n_batch_split = 2
+
+        batch_split, lengths_split, idx, rev_idx = split_batch(segments, n_segments_left, self.n_batch_split)
+        hit_pred = torch.zeros((points.shape[0],), device="cuda")
+        cls_pred = torch.zeros((points.shape[0], self.n_segments), device="cuda")
+        val_pred = torch.zeros((points.shape[0], self.n_segments), device="cuda")
+
+        # print("Lenghts:", end=" ")
+        for i in range(self.n_batch_split):
+            s = i * batch_split[0].shape[0]
+            e = s + batch_split[i].shape[0]
+            
+            cur_segments = batch_split[i]
+            cur_length = lengths_split[i].max().item()
+            # print(cur_length, e - s, end=" | ")
+            cur_segments = cur_segments[:, :cur_length]
+
+            # hit: global hit/miss prediction, cls: segment classification, val: segment distance prediction
+            cur_hit_pred, cur_cls_pred, cur_val_pred = self.net_forward(cur_segments)
+            hit_pred[s:e] = cur_hit_pred
+            cls_pred[s:e, :cur_length] = cur_cls_pred
+            val_pred[s:e, :cur_length] = cur_val_pred
+        # print()
+        
+        hit_pred = hit_pred[rev_idx]
+        cls_pred = cls_pred[rev_idx]
+        val_pred = val_pred[rev_idx]
+
+        # zero out cls for padded segments
+        cls_pred[~get_shrink_mask(segments_mask)] = float("-inf")
+
+        global_cls_pred = torch.scatter(
+            torch.zeros_like(cls_pred),
+            1,
+            segments_idx,
+            cls_pred,
+        )
+
+        shrink_argmax_pred = cls_pred.argmax(dim=1) # (n_rays,)
+        global_argmax_pred = torch.gather(segments_idx, 1, shrink_argmax_pred[:, None]).squeeze(1) # (n_rays,)
+
+        global_argmax_true = ((dist - t1) / self.segment_length).long()
+        shrink_argmax_true = torch.gather(segments_idx_rev, 1, global_argmax_true[:, None]).squeeze(1)
+
+        # distance with pred segment cls + pred dist
+        dist_pred = (
+            torch.gather(val_pred, 1, shrink_argmax_pred[:, None]).squeeze(1)
+            + global_argmax_pred * self.segment_length
             + t1
         )
-        b = (
-            torch.gather(dist_val_pred, 1, dist_segment_pred[:, None]).squeeze(1) * dist_per_segment
-            + dist_segment_pred * dist_per_segment
+
+        # distance with true segment cls + pred dist
+        dist_true = (
+            torch.gather(val_pred, 1, shrink_argmax_true[:, None]).squeeze(1)
+            + global_argmax_true * self.segment_length
             + t1
         )
-        # a = dist_pred + t1
-        # b = dist_pred + t1
 
-        cls_loss = F.binary_cross_entropy_with_logits(cls_pred, mask.float())
-        dist_cls_loss = F.cross_entropy(
-            dist_cls_pred[mask.squeeze(1)], dist_segment[mask.squeeze(1)]
-        )
-        dist_val_loss = F.mse_loss(a[mask], dist[mask])
+        # print(global_cls_pred[hit_mask])
+        # print(global_argmax_true[hit_mask])
 
-        acc1 = ((cls_pred > 0) == mask).float().mean().item()
-        acc2 = (dist_segment_pred[mask] == dist_segment[mask]).float().mean().item()
-        mse = F.mse_loss(b[mask], dist[mask])
-        loss = cls_loss
+        hit_loss = F.binary_cross_entropy_with_logits(hit_pred, hit_mask.float())
+        cls_loss = F.cross_entropy(global_cls_pred[hit_mask], global_argmax_true[hit_mask])
+        if hit_mask.sum() == 0:
+            cls_loss = torch.tensor(0, device="cuda", dtype=torch.float32)
+        dist_loss = F.mse_loss(dist_true[hit_mask], dist[hit_mask])
+        if hit_mask.sum() == 0:
+            dist_loss = torch.tensor(0, device="cuda", dtype=torch.float32)
 
-        if acc1 > 0.80:
-            # loss = loss + dist_val_loss / 100
-            loss = loss + dist_cls_loss + dist_val_loss / 100
+        hit_acc = ((hit_pred > 0) == hit_mask).float().mean().item()
+        cls_acc = (global_cls_pred.argmax(dim=1) == global_argmax_true).float().mean().item()
+        mse = F.mse_loss(dist_pred[hit_mask], dist[hit_mask])
+        if hit_mask.sum() == 0:
+            mse = torch.tensor(0, device="cuda", dtype=torch.float32)
 
-        return loss, acc1, mse
+        # for i in range(points.shape[0]):
+        #     if not hit_mask[i]:
+        #         continue
+        #     if global_cls_pred[i, global_argmax_true[i]] == -float("inf"):
+        #         print("ALERT")
+        #         print(f"{global_cls_pred[i]=}")
+        #         print(f"{global_argmax_true[i]=}")
+        #         print(f"{cls_pred[i]=}")
+        #         print(f"{global_argmax_pred[i]=}")
+        #         print(f"{segments_idx[i]=}")
+        #         print(f"{segments_idx_rev[i]=}")
+        #         print(f"{segments_mask[i]=}")
+        #         print(f"{n_segments_left[i]=}")
+        #         print(f"{self.mask_bvh[i]=}")
+        #         print(f"{self.t_values[i]=}")
+        #         print(f"{dist[i]=}")
+        #         print(f"{points[i]=}")
+
+        # t_values = torch.linspace(0, 1, self.n_points, device="cuda") * self.segment_length * self.n_segments
+        # print(t_values)
+        # print(dist - t1)
+
+
+        # print(f"{hit_loss.item()=:.2f}, {cls_loss.item()=:.2f}, {dist_loss.item()=:.2f}, {hit_acc=:.2f}, {cls_acc=:.2f}, {mse=:.2f}")
+
+        if cls_loss.item() == float("nan") or cls_loss.item() == float("inf"):
+            print("cls_loss")
+            exit()
+
+        if hit_loss.isnan().sum() > 0 or hit_loss.item() == float("inf"):
+            print("hit_loss")
+            exit()
+
+        if dist_loss.isnan().sum() > 0 or dist_loss.item() == float("inf"):
+            print("dist_loss")
+            exit()
+
+        loss = hit_loss
+        if hit_acc > 0.80:
+            loss = loss + cls_loss + dist_loss / 100
+
+        return loss, hit_acc, mse
 
 
 class MLPNet(nn.Module):
@@ -468,197 +652,34 @@ class BVHModel(nn.Module):
         return dist > 0, dist
 
 
-class Trainer:
-    def __init__(self, cfg, tqdm_leave=True):
-        self.cfg = cfg
-
-        self.Dataset = eval(self.cfg.dataset_class)
-        self.ds_train = self.Dataset(cfg.train).cuda()
-        self.ds_val = self.Dataset(cfg.val).cuda()
-        self.ds_cam = self.Dataset(cfg.cam).cuda()
-
-        self.tqdm_leave = tqdm_leave
-
-    def set_model(self, model, name=None):
-        self.model = model
-        with torch.no_grad():
-            model.forward(torch.randn(10, 6, device="cuda"))
-
-        self.optimizer = torch.optim.Adam(model.parameters(), lr=self.cfg.train.lr)
-        self.alpha = 0.99
-        self.logger_loss = MetricLogger(self.alpha)
-        self.logger_acc = MetricLogger(self.alpha)
-        self.logger_mse = MetricLogger(self.alpha)
-
-        n_params = get_num_params(self.model)
-        print(f"Model params: {n_params} ({n_params / 1e6:.3f}MB)")
-        if hasattr(self.model, "encoder"):
-            n_params = get_num_params(self.model.encoder)
-            print(f"Encoder params: {n_params} ({n_params / 1e6:.3f}MB)")
-        if hasattr(self.model, "net"):
-            n_params = get_num_params(self.model.net)
-            print(f"Net params: {n_params} ({n_params / 1e6:.3f}MB)")
-
-        if name is None:
-            name = f"{time.time()}"
-        self.writer = SummaryWriter(self.cfg.log_dir + '/' + name)
-        self.n_steps = 0
-        self.n_epoch = 0
-
-    def train(self):
-        self.ds_train.shuffle()
-
-        bar = tqdm(range(self.ds_train.n_batches()), leave=self.tqdm_leave)
-        for batch_idx in bar:
-            batch = self.ds_train.get_batch(batch_idx)
-            points, dist = batch["points"], batch["dist"]
-            mask = dist > 0
-
-            loss, acc, mse = self.model.get_loss(points, mask, dist)
-
-            self.optimizer.zero_grad()
-            loss.backward()
-            self.optimizer.step()
-
-            self.logger_loss.update(loss.item())
-            self.logger_acc.update(acc)
-            self.logger_mse.update(mse.item())
-
-            bar.set_description(f"loss: {self.logger_loss.ema():.3f}, acc: {self.logger_acc.ema():.3f}, mse: {self.logger_mse.ema():.3f}")
-
-            self.writer.add_scalar("Loss/train", self.logger_loss.ema(), self.n_steps)
-            self.writer.add_scalar("Acc/train", self.logger_acc.ema(), self.n_steps)
-            self.writer.add_scalar("MSE/train", self.logger_mse.ema(), self.n_steps)
-            self.n_steps += 1
-
-        self.n_epoch += 1
-
-        return {
-            "train_loss": self.logger_loss.mean(),
-            "train_acc": self.logger_acc.mean(),
-            "train_mse": self.logger_mse.mean(),
-        }
-
-    @torch.no_grad()
-    def val(self):
-        # please don't remove it if you don't know why it is here
-        self.ds_val.shuffle()
-
-        val_loss = 0
-        val_acc = 0
-        val_mse = 0
-        bar = tqdm(range(self.ds_val.n_batches()), leave=self.tqdm_leave)
-        for batch_idx in bar:
-            batch = self.ds_val.get_batch(batch_idx)
-            points, dist = batch["points"], batch["dist"]
-            mask = dist > 0
-
-            loss, acc, mse = self.model.get_loss(points, mask, dist)
-
-            val_loss += loss.item()
-            val_acc += acc
-            val_mse += mse.item()
-
-            bar.set_description(f"val_loss: {val_loss / (batch_idx + 1):.3f}, val_acc: {val_acc / (batch_idx + 1):.3f}, mse: {val_mse / (batch_idx + 1):.3f}")
-
-        val_loss /= self.ds_val.n_batches()
-        val_acc /= self.ds_val.n_batches()
-        val_mse /= self.ds_val.n_batches()
-
-        self.writer.add_scalar("Loss/val", val_loss, self.n_steps)
-        self.writer.add_scalar("Acc/val", val_acc, self.n_steps)
-        self.writer.add_scalar("MSE/val", val_mse, self.n_steps)
-
-        return {
-            "val_loss": val_loss,
-            "val_acc": val_acc,
-            "val_mse": self.logger_mse.ema(),
-        }
-
-    @torch.no_grad()
-    def cam(self):
-        img_dist = torch.zeros((800 * 800, 1), device="cuda")
-        img_mask_pred = torch.zeros((800 * 800, 1), device="cuda")
-        img_dist_pred = torch.zeros((800 * 800, 1), device="cuda")
-
-        bar = tqdm(range(self.ds_cam.n_batches()), leave=self.tqdm_leave)
-
-        start = time.time()
-        for batch_idx in bar:
-            batch = self.ds_cam.get_batch(batch_idx)
-            points, dist = batch["points"], batch["dist"]
-
-            batch_size = points.shape[0]
-
-            mask_pred, dist_pred = self.model(points)
-            img_mask_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = mask_pred
-            img_dist_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = dist_pred
-            img_dist[batch_idx * batch_size : (batch_idx + 1) * batch_size] = dist
-        torch.cuda.synchronize()
-        finish = time.time()
-        t = finish - start
-
-        img_dist = img_dist.reshape(1, 800, 800, 1)
-        img_mask_pred = img_mask_pred.reshape(1, 800, 800, 1)
-        img_dist_pred = img_dist_pred.reshape(1, 800, 800, 1) * (img_mask_pred > 0)
-
-        # img_dist = cut_edges(img_dist)
-        # img_dist_pred = cut_edges(img_dist_pred)
-        # mse_edge = F.mse_loss(img_dist, img_dist_pred).item()
-
-        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-        ax[0].axis("off")
-        ax[0].imshow(img_dist[0].cpu().numpy() ** 2, cmap="gray") # cubehelix
-        ax[1].axis("off")
-        ax[1].imshow(img_dist_pred[0].cpu().numpy() ** 2, cmap="gray")
-        plt.tight_layout()
-        plt.savefig("fig.png")
-        plt.clf()
-
-        # self.writer.add_scalar("MSE_edge/val", mse_edge, self.n_steps)
-        # print("MSE_edge:", mse_edge)
-
-        return {
-            'time': t,
-        }
-
-    def get_results(self, n_epochs=3):
-        results = {}
-        for i in range(max(1, n_epochs)):
-            results[i] = dict()
-
-            if n_epochs > 0:
-                train_res = self.train()
-                results[i].update(train_res)
-
-                val_res = self.val()
-                results[i].update(val_res)
-
-            cam_res = self.cam()
-            results[i].update(cam_res)
-            results[i]['enc_params'] = get_num_params(self.model.encoder)
-            results[i]['net_params'] = get_num_params(self.model.net)
-        return results
-
-
 @hydra.main(config_path="config", config_name="raytrace", version_base=None)
 def main(cfg):
     print(f"Loading data from {cfg.dataset_class}")
     trainer = Trainer(cfg, tqdm_leave=True)
 
-    n_points = 128
+    n_points = 256
 
     encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=14, finest_resolution=256)
     # encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=128)
     # encoder = None
 
-    model = TransformerModel(cfg, encoder, 24, 3, n_points, use_tcnn=True, attn=False, norm=True)
+    model = TransformerModel(cfg, encoder, 32, 6, n_points, use_tcnn=False, attn=True, norm=True, use_bvh=True)
     # model = MLPModel(cfg, encoder, 128, 6, n_points, use_tcnn=True, norm=True)
     # model = BVHModel(cfg, n_points, encoder)
 
-    name = "exp4"
+    name = "exp5"
     trainer.set_model(model, name)
     trainer.cam()
+
+    # points = torch.tensor([[-14.1821, -23.7087,  25.7147,  -1.6661,  20.8207, -19.8571]], device='cuda:0')
+    # hit_mask = torch.tensor([[True]], device='cuda:0')
+    # dist = torch.tensor([[23.5010]], device='cuda:0')
+    # trainer.model.get_loss(points, hit_mask, dist)
+
+    # dist[i]=tensor(22.8462, device='cuda:0')
+    # points[i]=tensor([ 14.9820, -28.0966,  18.0582,  -1.3444, -30.6856, -20.5027],
+    #    device='cuda:0')
+
     # exit()
     results = trainer.get_results(10)
     print(results)
