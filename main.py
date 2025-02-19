@@ -111,7 +111,9 @@ class TransformerModel(nn.Module):
         if use_bvh:
             self.bvh = BVH()
             self.bvh.load_scene(cfg.mesh_path)
-            self.bvh.build_bvh(15)
+            self.bvh.split_faces(0.9)
+            self.bvh.build_bvh(20)
+            print("BVH nodes:", self.bvh.n_nodes)
 
         self.encoder = encoder
 
@@ -190,10 +192,12 @@ class TransformerModel(nn.Module):
         mask_bvh = torch.ones((n_rays, self.n_points - 1), device="cuda", dtype=torch.bool)
         if self.use_bvh:
             bvh_start = orig + vec * t1[:, None]
-            bvh_end = orig + vec * t1[:, None] + vec * self.segment_length * self.n_segments
-            sphere_start_np = np.ascontiguousarray(bvh_start.cpu().numpy(), dtype=np.float32)
-            sphere_end_np = np.ascontiguousarray(bvh_end.cpu().numpy(), dtype=np.float32)
-            mask_bvh = self.bvh.intersect_segments(sphere_start_np, sphere_end_np, self.n_segments)
+            bvh_start_np = np.ascontiguousarray(bvh_start.cpu().numpy(), dtype=np.float32)
+
+            bvh_vec = vec * self.segment_length * self.n_segments
+            bvh_vec_np = np.ascontiguousarray(bvh_vec.cpu().numpy(), dtype=np.float32)
+
+            mask_bvh = self.bvh.segments(bvh_start_np, bvh_vec_np, self.n_segments)
             mask_bvh = torch.tensor(mask_bvh, device="cuda", dtype=torch.bool)
 
         # generate segments
@@ -202,7 +206,6 @@ class TransformerModel(nn.Module):
         segments = torch.cat([points[:, :-1], points[:, 1:]], dim=-1)
 
         # remove filtered segments, shrink and pad on the right
-        # mask_total = torch.ones((n_rays, self.n_points - 1), device="cuda", dtype=torch.bool)
         mask_total = mask_t_values & mask_bvh
         segments = shrink_batch(segments, mask_total)
 
@@ -219,8 +222,10 @@ class TransformerModel(nn.Module):
         return segments, segments_idx, segmends_idx_rev, mask_total.sum(dim=1), mask_total
     
     def encode_segments(self, segments):
-        n_rays = segments.shape[0]
+        if self.encoder is None:
+            return segments
 
+        n_rays = segments.shape[0]
         segments_flat = segments.reshape(-1, 3)
         segments_flat = self.encoder(segments_flat) # for some points it is called two times, TODO
         segments = segments_flat.reshape((n_rays, self.n_segments, -1))
@@ -252,7 +257,7 @@ class TransformerModel(nn.Module):
 
         hit = self.hit(x).squeeze(1)
         dist_cls = self.dist_cls(x).squeeze(2)
-        dist_val = self.dist_val(x).clamp(0, 1).squeeze(2)
+        dist_val = self.dist_val(x).squeeze(2)
 
         return hit, dist_cls, dist_val
     
@@ -295,7 +300,7 @@ class TransformerModel(nn.Module):
         t1, t2, mask_sphere = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
         t1, t2 = t1.squeeze(1), t2.squeeze(1)
         segments, segments_idx, segments_idx_rev, n_segments_left, segments_mask = self.generate_segments(orig, vec, t1, t2)
-
+    
         bvh_miss = segments_mask.sum(dim=1) == 0
         orig = orig[~bvh_miss]
         vec = vec[~bvh_miss]
@@ -314,24 +319,20 @@ class TransformerModel(nn.Module):
         frac = n_segments_left.sum().float() / (n_segments_left.shape[0] * self.n_segments)
         max_length = n_segments_left.max().item()
         # print(f"{frac=:.2f}, {max_length=}")
-
-        # hit_pred, cls_pred, val_pred = self.net_forward(segments, segments_mask)
         
-        self.n_batch_split = 2
+        self.n_batch_split = 1
 
         batch_split, lengths_split, idx, rev_idx = split_batch(segments, n_segments_left, self.n_batch_split)
         hit_pred = torch.zeros((points.shape[0],), device="cuda")
         cls_pred = torch.zeros((points.shape[0], self.n_segments), device="cuda")
         val_pred = torch.zeros((points.shape[0], self.n_segments), device="cuda")
 
-        # print("Lenghts:", end=" ")
         for i in range(self.n_batch_split):
             s = i * batch_split[0].shape[0]
             e = s + batch_split[i].shape[0]
             
             cur_segments = batch_split[i]
             cur_length = lengths_split[i].max().item()
-            # print(cur_length, e - s, end=" | ")
             cur_segments = cur_segments[:, :cur_length]
 
             # hit: global hit/miss prediction, cls: segment classification, val: segment distance prediction
@@ -339,7 +340,6 @@ class TransformerModel(nn.Module):
             hit_pred[s:e] = cur_hit_pred
             cls_pred[s:e, :cur_length] = cur_cls_pred
             val_pred[s:e, :cur_length] = cur_val_pred
-        # print()
         
         hit_pred = hit_pred[rev_idx]
         cls_pred = cls_pred[rev_idx]
@@ -358,6 +358,12 @@ class TransformerModel(nn.Module):
         shrink_argmax_pred = cls_pred.argmax(dim=1) # (n_rays,)
         global_argmax_pred = torch.gather(segments_idx, 1, shrink_argmax_pred[:, None]).squeeze(1) # (n_rays,)
 
+        dist_perturbed = dist + (torch.rand_like(dist) * 2 - 1) * self.segment_length * 0.1
+        dist_perturbed[dist_perturbed < t1] = t1[dist_perturbed < t1]
+        dist_perturbed[dist_perturbed > t2] = t2[dist_perturbed > t2]
+        global_argmax_true_p = ((dist_perturbed - t1) / self.segment_length).long()
+        shrink_argmax_true_p = torch.gather(segments_idx_rev, 1, global_argmax_true_p[:, None]).squeeze(1)
+
         global_argmax_true = ((dist - t1) / self.segment_length).long()
         shrink_argmax_true = torch.gather(segments_idx_rev, 1, global_argmax_true[:, None]).squeeze(1)
 
@@ -369,20 +375,17 @@ class TransformerModel(nn.Module):
         )
 
         # distance with true segment cls + pred dist
-        dist_true = (
-            torch.gather(val_pred, 1, shrink_argmax_true[:, None]).squeeze(1)
+        dist_true_p = (
+            torch.gather(val_pred, 1, shrink_argmax_true_p[:, None]).squeeze(1)
             + global_argmax_true * self.segment_length
             + t1
         )
-
-        # print(global_cls_pred[hit_mask])
-        # print(global_argmax_true[hit_mask])
 
         hit_loss = F.binary_cross_entropy_with_logits(hit_pred, hit_mask.float())
         cls_loss = F.cross_entropy(global_cls_pred[hit_mask], global_argmax_true[hit_mask])
         if hit_mask.sum() == 0:
             cls_loss = torch.tensor(0, device="cuda", dtype=torch.float32)
-        dist_loss = F.mse_loss(dist_true[hit_mask], dist[hit_mask])
+        dist_loss = F.mse_loss(dist_true_p[hit_mask], dist[hit_mask])
         if hit_mask.sum() == 0:
             dist_loss = torch.tensor(0, device="cuda", dtype=torch.float32)
 
@@ -391,43 +394,6 @@ class TransformerModel(nn.Module):
         mse = F.mse_loss(dist_pred[hit_mask], dist[hit_mask])
         if hit_mask.sum() == 0:
             mse = torch.tensor(0, device="cuda", dtype=torch.float32)
-
-        # for i in range(points.shape[0]):
-        #     if not hit_mask[i]:
-        #         continue
-        #     if global_cls_pred[i, global_argmax_true[i]] == -float("inf"):
-        #         print("ALERT")
-        #         print(f"{global_cls_pred[i]=}")
-        #         print(f"{global_argmax_true[i]=}")
-        #         print(f"{cls_pred[i]=}")
-        #         print(f"{global_argmax_pred[i]=}")
-        #         print(f"{segments_idx[i]=}")
-        #         print(f"{segments_idx_rev[i]=}")
-        #         print(f"{segments_mask[i]=}")
-        #         print(f"{n_segments_left[i]=}")
-        #         print(f"{self.mask_bvh[i]=}")
-        #         print(f"{self.t_values[i]=}")
-        #         print(f"{dist[i]=}")
-        #         print(f"{points[i]=}")
-
-        # t_values = torch.linspace(0, 1, self.n_points, device="cuda") * self.segment_length * self.n_segments
-        # print(t_values)
-        # print(dist - t1)
-
-
-        # print(f"{hit_loss.item()=:.2f}, {cls_loss.item()=:.2f}, {dist_loss.item()=:.2f}, {hit_acc=:.2f}, {cls_acc=:.2f}, {mse=:.2f}")
-
-        if cls_loss.item() == float("nan") or cls_loss.item() == float("inf"):
-            print("cls_loss")
-            exit()
-
-        if hit_loss.isnan().sum() > 0 or hit_loss.item() == float("inf"):
-            print("hit_loss")
-            exit()
-
-        if dist_loss.isnan().sum() > 0 or dist_loss.item() == float("inf"):
-            print("dist_loss")
-            exit()
 
         loss = hit_loss
         if hit_acc > 0.80:
@@ -657,7 +623,7 @@ def main(cfg):
     print(f"Loading data from {cfg.dataset_class}")
     trainer = Trainer(cfg, tqdm_leave=True)
 
-    n_points = 256
+    n_points = 128
 
     encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=14, finest_resolution=256)
     # encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=128)
@@ -670,17 +636,6 @@ def main(cfg):
     name = "exp5"
     trainer.set_model(model, name)
     trainer.cam()
-
-    # points = torch.tensor([[-14.1821, -23.7087,  25.7147,  -1.6661,  20.8207, -19.8571]], device='cuda:0')
-    # hit_mask = torch.tensor([[True]], device='cuda:0')
-    # dist = torch.tensor([[23.5010]], device='cuda:0')
-    # trainer.model.get_loss(points, hit_mask, dist)
-
-    # dist[i]=tensor(22.8462, device='cuda:0')
-    # points[i]=tensor([ 14.9820, -28.0966,  18.0582,  -1.3444, -30.6856, -20.5027],
-    #    device='cuda:0')
-
-    # exit()
     results = trainer.get_results(10)
     print(results)
 

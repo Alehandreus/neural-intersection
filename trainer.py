@@ -1,9 +1,10 @@
 import time
 import torch
+import torch.nn.functional as F
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from myutils.misc import MetricLogger, get_num_params
+from myutils.misc import MetricLogger, get_num_params, cut_edges
 from data import RayTraceDataset, BlenderDataset
 
 
@@ -29,14 +30,20 @@ class Trainer:
         self.logger_acc = MetricLogger(self.alpha)
         self.logger_mse = MetricLogger(self.alpha)
 
-        n_params = get_num_params(self.model)
-        print(f"Model params: {n_params} ({n_params / 1e6:.3f}MB)")
+        total_bytes = 0
         if hasattr(self.model, "encoder"):
-            n_params = get_num_params(self.model.encoder)
-            print(f"Encoder params: {n_params} ({n_params / 1e6:.3f}MB)")
+            encoder_bytes = get_num_params(self.model.encoder)
+            total_bytes += encoder_bytes
+            print(f"Encoder bytes: {encoder_bytes} ({encoder_bytes / 1e6:.3f}MB)")
         if hasattr(self.model, "net"):
-            n_params = get_num_params(self.model.net)
-            print(f"Net params: {n_params} ({n_params / 1e6:.3f}MB)")
+            net_bytes = get_num_params(self.model.net)
+            total_bytes += net_bytes
+            print(f"Net params: {net_bytes} ({net_bytes / 1e6:.3f}MB)")
+        if hasattr(self.model, "bvh"):
+            bvh_bytes = self.model.bvh.memory_bytes()
+            total_bytes += bvh_bytes
+            print(f"Bvh bytes: {bvh_bytes} ({bvh_bytes / 1e6:.3f}MB)")
+        print(f"Total bytes: {total_bytes} ({total_bytes / 1e6:.3f}MB)")
 
         if name is None:
             name = f"{time.time()}"
