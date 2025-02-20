@@ -194,7 +194,6 @@ class TransformerModel(nn.Module):
         if self.use_bvh:
             bvh_start = orig + vec * t1[:, None]
             bvh_vec = vec * self.segment_length * self.n_segments
-
             mask_bvh = self.bvh.segments_cuda(bvh_start, bvh_vec, self.n_segments)
 
         # generate segments
@@ -223,9 +222,10 @@ class TransformerModel(nn.Module):
             return segments
 
         n_rays = segments.shape[0]
+        n_segments = segments.shape[1]
         segments_flat = segments.reshape(-1, 3)
         segments_flat = self.encoder(segments_flat) # for some points it is called two times, TODO
-        segments = segments_flat.reshape((n_rays, self.n_segments, -1))
+        segments = segments_flat.reshape((n_rays, n_segments, -1))
         return segments
 
     def net_forward(self, segments):
@@ -267,21 +267,65 @@ class TransformerModel(nn.Module):
         t1, t2, mask_sphere = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
         t1, t2 = t1.squeeze(1), t2.squeeze(1)
         segments, segments_idx, segments_idx_rev, n_segments_left, segments_mask = self.generate_segments(orig, vec, t1, t2)
-        segments = self.encode_segments(segments)
-        # hit: global hit/miss prediction, cls: segment classification, val: segment distance prediction
-        hit_pred, cls_pred, val_pred = self.net_forward(segments)
+
+        if points.shape[0] == 10:
+            # need to run at least one to initialize lazy layers
+            # I'm genuinely sorry for this
+            bvh_miss = torch.zeros((points.shape[0],), device="cuda", dtype=torch.bool)
+        else:
+            bvh_miss = segments_mask.sum(dim=1) == 0
+            orig = orig[~bvh_miss]
+            vec = vec[~bvh_miss]
+            t1 = t1[~bvh_miss]
+            t2 = t2[~bvh_miss]
+            segments = segments[~bvh_miss]
+            segments_idx = segments_idx[~bvh_miss]
+            segments_idx_rev = segments_idx_rev[~bvh_miss]
+            n_segments_left = n_segments_left[~bvh_miss]
+            segments_mask = segments_mask[~bvh_miss]
+
+        if (~bvh_miss).sum() == 0:
+            return torch.zeros((points.shape[0],), device="cuda") - 100, torch.zeros((points.shape[0],), device="cuda")
+
+        n_batch_split = 2
+        batch_split, lengths_split, idx, rev_idx = split_batch(segments, n_segments_left, n_batch_split)        
+        hit_pred = torch.zeros((orig.shape[0],), device="cuda")
+        cls_pred = torch.zeros((orig.shape[0], self.n_segments), device="cuda")
+        val_pred = torch.zeros((orig.shape[0], self.n_segments), device="cuda")
+
+        for i in range(n_batch_split):
+            s = i * batch_split[0].shape[0]
+            e = s + batch_split[i].shape[0]
+            l = lengths_split[i].max().item()
+
+            cur_segments = batch_split[i][:, :l]
+
+            cur_segments = self.encode_segments(cur_segments)
+            cur_hit_pred, cur_cls_pred, cur_val_pred = self.net_forward(cur_segments)
+
+            hit_pred[s:e] = cur_hit_pred
+            cls_pred[s:e, :l] = cur_cls_pred
+            val_pred[s:e, :l] = cur_val_pred
+
+        hit_pred = hit_pred[rev_idx]
+        cls_pred = cls_pred[rev_idx]
+        val_pred = val_pred[rev_idx]
+
         # zero out cls for padded segments
         cls_pred[~get_shrink_mask(segments_mask)] = float("-inf")
-        hit_pred[segments_mask.sum(dim=1) == 0] = -100 # should be float("-inf") but nan
+        hit_pred[segments_mask.sum(dim=1) == 0] = -100 # should be float("-inf") but it causes nan
 
         shrink_argmax_pred = cls_pred.argmax(dim=1) # (n_rays,)
         global_argmax_pred = torch.gather(segments_idx, 1, shrink_argmax_pred[:, None]).squeeze(1) # (n_rays,)
 
         dist_pred = (
             torch.gather(val_pred, 1, shrink_argmax_pred[:, None]).squeeze(1)
-            + global_argmax_pred * self.segment_length
+            + global_argmax_pred * self.segment_length + t1
             + t1
-        ) # (n_rays,)
+        )
+
+        hit_pred = torch.full((points.shape[0],), -100, device="cuda", dtype=hit_pred.dtype).masked_scatter_(~bvh_miss, hit_pred)
+        dist_pred = torch.zeros((points.shape[0],), device="cuda", dtype=dist_pred.dtype).masked_scatter_(~bvh_miss, dist_pred)
 
         return hit_pred, dist_pred
 
@@ -317,14 +361,14 @@ class TransformerModel(nn.Module):
         max_length = n_segments_left.max().item()
         # print(f"{frac=:.2f}, {max_length=}")
         
-        self.n_batch_split = 1
+        n_batch_split = 1
 
-        batch_split, lengths_split, idx, rev_idx = split_batch(segments, n_segments_left, self.n_batch_split)
+        batch_split, lengths_split, idx, rev_idx = split_batch(segments, n_segments_left, n_batch_split)
         hit_pred = torch.zeros((points.shape[0],), device="cuda")
         cls_pred = torch.zeros((points.shape[0], self.n_segments), device="cuda")
         val_pred = torch.zeros((points.shape[0], self.n_segments), device="cuda")
 
-        for i in range(self.n_batch_split):
+        for i in range(n_batch_split):
             s = i * batch_split[0].shape[0]
             e = s + batch_split[i].shape[0]
             

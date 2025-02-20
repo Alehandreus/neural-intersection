@@ -79,7 +79,7 @@ def split_batch(batch, lengths, n_split):
 
     for i in range(n_split):
         max_length = lengths_split[i].max()
-        batch_split[i] = batch_split[i][:, :max_length]
+        # batch_split[i] = batch_split[i][:, :max_length]
 
     rev_idx = torch.argsort(idx)
 
