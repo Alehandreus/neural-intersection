@@ -113,6 +113,7 @@ class TransformerModel(nn.Module):
             self.bvh.load_scene(cfg.mesh_path)
             self.bvh.split_faces(0.9)
             self.bvh.build_bvh(20)
+            self.bvh.cudify()
             print("BVH nodes:", self.bvh.n_nodes)
 
         self.encoder = encoder
@@ -192,13 +193,9 @@ class TransformerModel(nn.Module):
         mask_bvh = torch.ones((n_rays, self.n_points - 1), device="cuda", dtype=torch.bool)
         if self.use_bvh:
             bvh_start = orig + vec * t1[:, None]
-            bvh_start_np = np.ascontiguousarray(bvh_start.cpu().numpy(), dtype=np.float32)
-
             bvh_vec = vec * self.segment_length * self.n_segments
-            bvh_vec_np = np.ascontiguousarray(bvh_vec.cpu().numpy(), dtype=np.float32)
 
-            mask_bvh = self.bvh.segments(bvh_start_np, bvh_vec_np, self.n_segments)
-            mask_bvh = torch.tensor(mask_bvh, device="cuda", dtype=torch.bool)
+            mask_bvh = self.bvh.segments_cuda(bvh_start, bvh_vec, self.n_segments)
 
         # generate segments
         points = orig[:, None, :] + vec[:, None, :] * t_values[:, :, None]
