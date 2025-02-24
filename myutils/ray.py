@@ -244,7 +244,7 @@ def to_sphere_torch(origins, vectors, sphere_location, sphere_radius, return_poi
             origins + t1[..., None] * vectors,
             origins + t2[..., None] * vectors,
         ], dim=-1), mask
-    return t1[..., None], t2[..., None], mask
+    return t1, t2, mask
 
 
 def to_sphere_torch_check(origins, vectors, sphere_location, sphere_radius, return_points=False):

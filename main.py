@@ -1,13 +1,12 @@
 import hydra
 import matplotlib.pyplot as plt
 import torch
-import trimesh
 import numpy as np
 from torch import nn
 from torch.nn import functional as F
 from tqdm import tqdm
 import tinycudann as tcnn
-from bvh import BVH
+from bvh import Mesh, CPUBuilder, GPUTraverser
 
 from myutils.modules import TransformerBlock, AttentionPooling, MeanPooling, HashGridLoRAEncoder
 from myutils.misc import *
@@ -17,14 +16,6 @@ from trainer import Trainer
 
 
 torch.set_float32_matmul_precision("high")
-
-
-DEBUG = True
-DEBUG_PREF = "debug |"
-
-
-def print_debug(*args, **kwargs):
-    print(DEBUG_PREF, *args, **kwargs)
 
 
 class HashGridEncoder(nn.Module):
@@ -63,58 +54,28 @@ class HashGridEncoder(nn.Module):
         return x  
 
 
-class ModelWrapper(nn.Module):
-    def __init__(self, cfg, encoder, n_points=2):
-        super().__init__()
-        self.encoder = encoder
-        self.sphere_center = nn.Parameter(torch.tensor([0, 0, 0]), requires_grad=False)
-        self.sphere_radius = cfg.sphere_radius
-        self.n_points = n_points
-        self.segment_length = (cfg.sphere_radius * 2) / n_points
-    
-    def encode_points(self, x):
-        orig = x[..., :3]
-        vec = x[..., 3:] - x[..., :3]
-        vec = vec / vec.norm(dim=-1, keepdim=True)
-    
-        t1, t2, mask = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
-
-        orig = orig + vec * t1
-        # vec = vec * (t2 - t1)
-        vec = vec * self.segment_length * (self.n_points - 1)
-        ts = torch.linspace(0, 1, self.n_points, device="cuda")
-        x = orig[..., None, :] + vec[..., None, :] * ts[None, :, None]
-
-        x = x.reshape(x.shape[0], -1)
-        x = x / self.sphere_radius
-
-        if self.encoder:
-            x = self.encoder(x)
-
-        return x, mask, t1, t2
-
-
 class TransformerModel(nn.Module):
     def __init__(self, cfg, encoder, dim, n_layers, n_points, attn=True, norm=True, use_tcnn=True, use_bvh=True, n_batch_split=10):
         super().__init__()
 
         self.cfg = cfg
         self.sphere_center = nn.Parameter(torch.tensor([0, 0, 0]), requires_grad=False)
-        self.sphere_radius = cfg.sphere_radius
+        self.sphere_radius = 40
         self.n_points = n_points
         self.n_segments = n_points - 1
-        self.segment_length = (cfg.sphere_radius * 2) / self.n_segments
+        self.segment_length = (self.sphere_radius * 2) / self.n_segments
         self.n_batch_split = n_batch_split
         self.dim = dim
         self.n_layers = n_layers
 
         if use_bvh:
-            self.bvh = BVH()
-            self.bvh.load_scene(cfg.mesh_path)
-            self.bvh.split_faces(0.9)
-            self.bvh.build_bvh(20)
-            self.bvh.cudify()
-            print("BVH nodes:", self.bvh.n_nodes)
+            mesh = Mesh(cfg.mesh.path)
+            mesh.split_faces(cfg.mesh.split_faces)
+            builder = CPUBuilder(mesh)
+            self.bvh_data = builder.build_bvh(cfg.mesh.bvh_depth)
+            self.bvh = GPUTraverser(self.bvh_data)
+
+            print("BVH nodes:", self.bvh_data.n_nodes)
 
         self.encoder = encoder
 
@@ -163,6 +124,13 @@ class TransformerModel(nn.Module):
             self.dist,
         ])
 
+        # init lazy layers
+        dummy_input = torch.randn((10, self.n_segments, 6), device="cuda")
+        if self.encoder is not None:
+            dummy_input = self.encoder(dummy_input)
+        dummy_input = dummy_input.cpu()
+        self.net_forward(dummy_input)
+
     def generate_segments(self, orig, vec, t1, t2):
         """
         Generate segments for a ray, cut by sphere and BVH
@@ -194,7 +162,7 @@ class TransformerModel(nn.Module):
         if self.use_bvh:
             bvh_start = orig + vec * t1[:, None]
             bvh_vec = vec * self.segment_length * self.n_segments
-            mask_bvh = self.bvh.segments_cuda(bvh_start, bvh_vec, self.n_segments)
+            mask_bvh = self.bvh.segments(bvh_start, bvh_vec, self.n_segments)
 
         # generate segments
         points = orig[:, None, :] + vec[:, None, :] * t_values[:, :, None]
@@ -258,65 +226,44 @@ class TransformerModel(nn.Module):
 
         return hit, dist_cls, dist_val
     
-    def forward(self, points):
-        orig = points[..., :3]
-        vec = points[..., 3:] - points[..., :3]
+    def forward(self, orig, vec):
         vec = vec / vec.norm(dim=-1, keepdim=True)
+        n_rays = orig.shape[0]
 
-        # project to sphere, cut segments, run hashgrid, run transformer
+
+        # ==== intersect sphere and BVH, generate segments ==== #
+
         t1, t2, mask_sphere = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
-        t1, t2 = t1.squeeze(1), t2.squeeze(1)
         segments, segments_idx, segments_idx_rev, n_segments_left, segments_mask = self.generate_segments(orig, vec, t1, t2)
 
-        if points.shape[0] == 10:
-            # need to run at least one to initialize lazy layers
-            # I'm genuinely sorry for this
-            bvh_miss = torch.zeros((points.shape[0],), device="cuda", dtype=torch.bool)
-        else:
-            bvh_miss = segments_mask.sum(dim=1) == 0
-            orig = orig[~bvh_miss]
-            vec = vec[~bvh_miss]
-            t1 = t1[~bvh_miss]
-            t2 = t2[~bvh_miss]
-            segments = segments[~bvh_miss]
-            segments_idx = segments_idx[~bvh_miss]
-            segments_idx_rev = segments_idx_rev[~bvh_miss]
-            n_segments_left = n_segments_left[~bvh_miss]
-            segments_mask = segments_mask[~bvh_miss]
 
-        if (~bvh_miss).sum() == 0:
-            return torch.zeros((points.shape[0],), device="cuda") - 100, torch.zeros((points.shape[0],), device="cuda")
+        # ==== some rays didn't even hit BVH ==== #
 
-        n_batch_split = 2
-        batch_split, lengths_split, idx, rev_idx = split_batch(segments, n_segments_left, n_batch_split)        
-        hit_pred = torch.zeros((orig.shape[0],), device="cuda")
-        cls_pred = torch.zeros((orig.shape[0], self.n_segments), device="cuda")
-        val_pred = torch.zeros((orig.shape[0], self.n_segments), device="cuda")
+        bvh_hit = segments_mask.sum(dim=1) > 0
+        if bvh_hit.sum() == 0:
+            return torch.zeros((n_rays,), device="cuda") - 100, torch.zeros((n_rays,), device="cuda")
+    
+        t1 = t1[bvh_hit]
+        segments = segments[bvh_hit]
+        segments_idx = segments_idx[bvh_hit]
+        segments_mask = segments_mask[bvh_hit]
 
-        for i in range(n_batch_split):
-            s = i * batch_split[0].shape[0]
-            e = s + batch_split[i].shape[0]
-            l = lengths_split[i].max().item()
 
-            cur_segments = batch_split[i][:, :l]
+        # ==== shrink batch and run net ==== #
+        
+        max_length = segments_mask.sum(dim=1).max().item()
+        segments = segments[:, :max_length]
+        segments = self.encode_segments(segments)
+        hit_pred, cls_pred, val_pred = self.net_forward(segments)
 
-            cur_segments = self.encode_segments(cur_segments)
-            cur_hit_pred, cur_cls_pred, cur_val_pred = self.net_forward(cur_segments)
+        
+        # ==== process output and pad back ==== #
 
-            hit_pred[s:e] = cur_hit_pred
-            cls_pred[s:e, :l] = cur_cls_pred
-            val_pred[s:e, :l] = cur_val_pred
-
-        hit_pred = hit_pred[rev_idx]
-        cls_pred = cls_pred[rev_idx]
-        val_pred = val_pred[rev_idx]
-
-        # zero out cls for padded segments
-        cls_pred[~get_shrink_mask(segments_mask)] = float("-inf")
+        cls_pred[~get_shrink_mask(segments_mask[:, :max_length])] = float("-inf")
         hit_pred[segments_mask.sum(dim=1) == 0] = -100 # should be float("-inf") but it causes nan
 
-        shrink_argmax_pred = cls_pred.argmax(dim=1) # (n_rays,)
-        global_argmax_pred = torch.gather(segments_idx, 1, shrink_argmax_pred[:, None]).squeeze(1) # (n_rays,)
+        shrink_argmax_pred = cls_pred.argmax(dim=1)
+        global_argmax_pred = torch.gather(segments_idx, 1, shrink_argmax_pred[:, None]).squeeze(1)
 
         dist_pred = (
             torch.gather(val_pred, 1, shrink_argmax_pred[:, None]).squeeze(1)
@@ -324,69 +271,54 @@ class TransformerModel(nn.Module):
             + t1
         )
 
-        hit_pred = torch.full((points.shape[0],), -100, device="cuda", dtype=hit_pred.dtype).masked_scatter_(~bvh_miss, hit_pred)
-        dist_pred = torch.zeros((points.shape[0],), device="cuda", dtype=dist_pred.dtype).masked_scatter_(~bvh_miss, dist_pred)
+        hit_pred = torch.full((n_rays,), -100, device="cuda", dtype=hit_pred.dtype).masked_scatter_(bvh_hit, hit_pred)
+        dist_pred = torch.zeros((n_rays,), device="cuda", dtype=dist_pred.dtype).masked_scatter_(bvh_hit, dist_pred)
 
         return hit_pred, dist_pred
 
-    def get_loss(self, points, hit_mask, dist):
-        hit_mask = hit_mask.squeeze(1)
-        dist = dist.squeeze(1)
-
-        orig = points[..., :3]
-        vec = points[..., 3:] - points[..., :3]
+    def get_loss(self, orig, vec, hit_mask, dist):
         vec = vec / vec.norm(dim=-1, keepdim=True)
+        n_rays = orig.shape[0]
 
-        # project to sphere, cut segments, run hashgrid, run transformer
+
+        # ==== intersect sphere and BVH, generate segments ==== #
+
         t1, t2, mask_sphere = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
-        t1, t2 = t1.squeeze(1), t2.squeeze(1)
         segments, segments_idx, segments_idx_rev, n_segments_left, segments_mask = self.generate_segments(orig, vec, t1, t2)
-    
-        bvh_miss = segments_mask.sum(dim=1) == 0
-        orig = orig[~bvh_miss]
-        vec = vec[~bvh_miss]
-        t1 = t1[~bvh_miss]
-        t2 = t2[~bvh_miss]
-        segments = segments[~bvh_miss]
-        segments_idx = segments_idx[~bvh_miss]
-        segments_idx_rev = segments_idx_rev[~bvh_miss]
-        n_segments_left = n_segments_left[~bvh_miss]
-        segments_mask = segments_mask[~bvh_miss]
-        hit_mask = hit_mask[~bvh_miss]
-        dist = dist[~bvh_miss]
 
+
+        # ==== some rays didn't even hit BVH ==== #
+
+        bvh_hit = segments_mask.sum(dim=1) > 0
+        if bvh_hit.sum() == 0:
+            return (
+                torch.tensor(0., device="cuda", requires_grad=True), 
+                0, 
+                torch.tensor(0., device="cuda", requires_grad=True),
+            )
+
+        t1 = t1[bvh_hit]
+        t2 = t2[bvh_hit]
+        segments = segments[bvh_hit]
+        segments_idx = segments_idx[bvh_hit]
+        segments_idx_rev = segments_idx_rev[bvh_hit]
+        segments_mask = segments_mask[bvh_hit]
+        hit_mask = hit_mask[bvh_hit]
+        dist = dist[bvh_hit]
+
+
+        # ==== shrink batch and run net ==== #
+
+        max_length = segments_mask.sum(dim=1).max().item()
+        segments = segments[:, :max_length]
         segments = self.encode_segments(segments)
+        hit_pred, cls_pred, val_pred = self.net_forward(segments)
+        cls_pred = F.pad(cls_pred, (0, self.n_segments - cls_pred.shape[1]))
+        val_pred = F.pad(val_pred, (0, self.n_segments - val_pred.shape[1]))
 
-        frac = n_segments_left.sum().float() / (n_segments_left.shape[0] * self.n_segments)
-        max_length = n_segments_left.max().item()
-        # print(f"{frac=:.2f}, {max_length=}")
-        
-        n_batch_split = 1
 
-        batch_split, lengths_split, idx, rev_idx = split_batch(segments, n_segments_left, n_batch_split)
-        hit_pred = torch.zeros((points.shape[0],), device="cuda")
-        cls_pred = torch.zeros((points.shape[0], self.n_segments), device="cuda")
-        val_pred = torch.zeros((points.shape[0], self.n_segments), device="cuda")
+        # ==== process output and pad back ==== #
 
-        for i in range(n_batch_split):
-            s = i * batch_split[0].shape[0]
-            e = s + batch_split[i].shape[0]
-            
-            cur_segments = batch_split[i]
-            cur_length = lengths_split[i].max().item()
-            cur_segments = cur_segments[:, :cur_length]
-
-            # hit: global hit/miss prediction, cls: segment classification, val: segment distance prediction
-            cur_hit_pred, cur_cls_pred, cur_val_pred = self.net_forward(cur_segments)
-            hit_pred[s:e] = cur_hit_pred
-            cls_pred[s:e, :cur_length] = cur_cls_pred
-            val_pred[s:e, :cur_length] = cur_val_pred
-        
-        hit_pred = hit_pred[rev_idx]
-        cls_pred = cls_pred[rev_idx]
-        val_pred = val_pred[rev_idx]
-
-        # zero out cls for padded segments
         cls_pred[~get_shrink_mask(segments_mask)] = float("-inf")
 
         global_cls_pred = torch.scatter(
@@ -396,8 +328,8 @@ class TransformerModel(nn.Module):
             cls_pred,
         )
 
-        shrink_argmax_pred = cls_pred.argmax(dim=1) # (n_rays,)
-        global_argmax_pred = torch.gather(segments_idx, 1, shrink_argmax_pred[:, None]).squeeze(1) # (n_rays,)
+        shrink_argmax_pred = cls_pred.argmax(dim=1)
+        global_argmax_pred = torch.gather(segments_idx, 1, shrink_argmax_pred[:, None]).squeeze(1)
 
         dist_perturbed = dist + (torch.rand_like(dist) * 2 - 1) * self.segment_length * 0.1
         dist_perturbed[dist_perturbed < t1] = t1[dist_perturbed < t1]
@@ -406,6 +338,7 @@ class TransformerModel(nn.Module):
         shrink_argmax_true_p = torch.gather(segments_idx_rev, 1, global_argmax_true_p[:, None]).squeeze(1)
 
         global_argmax_true = ((dist - t1) / self.segment_length).long()
+        global_argmax_true[~hit_mask] = 0
         shrink_argmax_true = torch.gather(segments_idx_rev, 1, global_argmax_true[:, None]).squeeze(1)
 
         # distance with pred segment cls + pred dist
@@ -421,6 +354,9 @@ class TransformerModel(nn.Module):
             + global_argmax_true * self.segment_length
             + t1
         )
+
+
+        # ==== calculate losses ==== #
 
         hit_loss = F.binary_cross_entropy_with_logits(hit_pred, hit_mask.float())
         cls_loss = F.cross_entropy(global_cls_pred[hit_mask], global_argmax_true[hit_mask])
@@ -443,242 +379,22 @@ class TransformerModel(nn.Module):
         return loss, hit_acc, mse
 
 
-class MLPNet(nn.Module):
-    def __init__(self, dim, n_layers, use_tcnn=True, norm=False):
-        super().__init__()
-
-        if use_tcnn and not norm:
-            self.layers = nn.Sequential(
-                nn.LazyLinear(dim),
-                nn.ReLU(),
-                tcnn.Network(dim, dim, {
-                    "otype": "CutlassMLP",
-                    "activation": "ReLU",
-                    "output_activation": "None",
-                    "n_neurons": dim,
-                    "n_hidden_layers": n_layers - 3,
-                }),
-            )
-        else:
-            self.layers = [nn.LazyLinear(dim)]
-            for _ in range(n_layers - 1):
-                self.layers.append(nn.ReLU())
-                self.layers.append(nn.Linear(dim, dim))
-                if norm:
-                    self.layers.append(nn.LayerNorm(dim))
-            self.layers = nn.Sequential(*self.layers)                
-
-        self.cls = nn.Linear(dim, 1)
-        self.dist = nn.Linear(dim, 1)
-
-    def forward(self, x, t1, t2, bbox_mask):
-        x = self.layers(x).float()
-        cls = self.cls(x)
-        dist = self.dist(x) + t1
-        return cls, dist
-
-    def get_loss(self, x, t1, t2, bbox_mask, mask, dist):
-        mask = mask & bbox_mask.unsqueeze(1)
-
-        cls_pred, dist_pred = self(x, t1, t2, bbox_mask)
-        cls_loss = F.binary_cross_entropy_with_logits(cls_pred, mask.float())
-
-        mse = F.mse_loss(dist_pred[mask], dist[mask])
-        acc = ((cls_pred > 0) == mask).float().mean().item()
-        loss = cls_loss
-        if acc > 0.80:
-            loss = loss + mse / 100
-        return loss, acc, mse
-
-
-class MLPModel(ModelWrapper):
-    def __init__(self, cfg, encoder, dim, n_layers, n_points, use_tcnn=True, norm=False):
-        super().__init__(cfg, encoder, n_points)
-        self.net = MLPNet(dim, n_layers, use_tcnn, norm)
-        self.cuda()
-
-    def forward(self, points):
-        x, bbox_mask, t1, t2 = self.encode_points(points)
-        cls, dist = self.net(x, t1, t2, bbox_mask)
-        cls[~bbox_mask] = -1
-        dist[~bbox_mask] = 0
-        return cls, dist
-
-    def get_loss(self, points, mask, dist):
-        x, bbox_mask, t1, t2 = self.encode_points(points)
-        return self.net.get_loss(x, t1, t2, bbox_mask, mask, dist)
-
-
-class BVHModel(nn.Module):
-    def __init__(self, cfg, n_points, encoder):
-        super().__init__()
-        self.n_points = n_points # number of points to sample in between
-        self.encoder = encoder
-        self.net = MLPNet(128, 6, use_tcnn=True, norm=False)
-
-        self.sphere_center = nn.Parameter(torch.tensor([0, 0, 0]), requires_grad=False)
-        self.sphere_radius = cfg.sphere_radius
-
-        self.bvh = BVH()
-        self.bvh.load_scene(cfg.mesh_path)
-        self.bvh.build_bvh(5)
-        self.bvh.save_as_obj("bvh.obj")
-        self.stack_depth = 20
-
-        self.n_iter = 0
-
-        self.cuda()
-
-    def run_bvh(self, orig_np, vec_np, stack_size_np, stack_np):
-        mask, leaf_indices, t1, t2 = self.bvh.intersect_leaves(orig_np, vec_np, stack_size_np, stack_np)
-
-        mask = torch.tensor(mask, device="cuda", dtype=torch.bool)[:, None]
-        t1 = torch.tensor(t1, device="cuda", dtype=torch.float32)[:, None]
-        t2 = torch.tensor(t2, device="cuda", dtype=torch.float32)[:, None]
-
-        return mask, leaf_indices, t1, t2
-    
-    def get_stack_depth(self):
-        # if self.n_iter < 1000:
-        #     return 1
-        # if self.n_iter < 2000:
-        #     return 5
-        return 15
-
-    def get_loss(self, x, mask, dist):
-        self.n_iter += 1
-
-        orig = x[..., :3]
-        vec = x[..., 3:] - x[..., :3]
-        vec = vec / vec.norm(dim=-1, keepdim=True)
-
-        stack_size_np = np.ones((x.shape[0],), dtype=np.int32)
-        stack_np = np.zeros((x.shape[0], self.stack_depth), dtype=np.uint32)
-        orig_np = orig.cpu().numpy()
-        orig_np = np.ascontiguousarray(orig_np, dtype=np.float32)
-        vec_np = vec.cpu().numpy()
-        vec_np = np.ascontiguousarray(vec_np, dtype=np.float32)
-
-        n_active_rays = x.shape[0]
-
-        loss = torch.tensor(0, device="cuda", dtype=torch.float32)
-        acc_nom = 0
-        acc_denom = 0
-        cls_loss = torch.tensor(0, device="cuda", dtype=torch.float32)
-        mse_loss = torch.tensor(0, device="cuda", dtype=torch.float32)
-
-        n_iter = 0
-        bbox_per_hit = torch.zeros((x.shape[0], 1), device="cuda", dtype=torch.float32)
-
-        while n_active_rays > 0:
-            bvh_mask, leaf_indices, t1, t2 = self.run_bvh(orig_np, vec_np, stack_size_np, stack_np)
-            n_active_rays = bvh_mask.sum().item()
-
-            if n_active_rays == 0:
-                break
-            
-            import random
-            if n_iter == 0 or random.random() < 0.03:
-                true_cls = (dist > t1) & (dist < t2) & bvh_mask
-                bbox_per_hit += true_cls.float()
-                # print(t1[0].item(), t2[0].item(), dist[0].item())
-                # true_cls = bvh_mask
-
-                inp_orig = orig + vec * t1
-                inp_vec = vec * (t2 - t1)
-                ts = torch.linspace(0, 1, self.n_points, device="cuda")
-                inp = inp_orig[..., None, :] + inp_vec[..., None, :] * ts[None, :, None]
-                inp /= self.sphere_radius
-                if self.encoder: inp = self.encoder(inp)
-                inp = inp.reshape(inp.shape[0], -1)
-
-                pred_cls, pred_dist = self.net(inp, t1, t2, None)
-
-                acc_nom += ((pred_cls > 0) == true_cls).sum().item()
-                acc_denom += true_cls.shape[0]
-
-                cls_loss += F.binary_cross_entropy_with_logits(
-                    pred_cls, true_cls.float(),
-                    weight=true_cls.float() * 100 + 1
-                )
-                mse_loss += F.mse_loss(pred_dist[true_cls], dist[true_cls]) if true_cls.sum() > 0 else torch.tensor(0, device="cuda", dtype=torch.float32)
-
-            # a = F.mse_loss(pred_dist[true_cls], dist[true_cls]) if true_cls.sum() > 0 else torch.tensor(0, device="cuda", dtype=torch.float32)
-            # if a.isnan().sum() > 0:
-            #     print(pred_dist.sum(), pred_cls.sum())
-
-            # n_active_rays = 0
-            n_iter += 1
-        
-        # print("n_iter:", n_iter)
-
-        # mse_loss[bbox_per_hit > 0] /= bbox_per_hit[bbox_per_hit > 0]
-
-        loss = cls_loss + mse_loss
-        acc = acc_nom / acc_denom if acc_denom > 0 else 0
-        return loss, acc, mse_loss
-
-    def forward(self, x):
-        orig = x[..., :3]
-        vec = x[..., 3:] - x[..., :3]
-
-        stack_size_np = np.ones((x.shape[0],), dtype=np.int32)
-        stack_np = np.zeros((x.shape[0], self.stack_depth), dtype=np.uint32)
-        orig_np = orig.cpu().numpy()
-        orig_np = np.ascontiguousarray(orig_np, dtype=np.float32)
-        vec_np = vec.cpu().numpy()
-        vec_np = np.ascontiguousarray(vec_np, dtype=np.float32)
-
-        n_active_rays = x.shape[0]
-        dist = torch.inf * torch.ones((x.shape[0], 1), device="cuda", dtype=torch.float32)
-
-        while n_active_rays > 0:
-            bvh_mask, leaf_indices, t1, t2 = self.run_bvh(orig_np, vec_np, stack_size_np, stack_np)
-            n_active_rays = bvh_mask.sum().item()
-
-            inp_orig = orig + vec * t1
-            inp_vec = vec * (t2 - t1)
-            ts = torch.linspace(0, 1, self.n_points, device="cuda")
-            inp = inp_orig[..., None, :] + inp_vec[..., None, :] * ts[None, :, None]
-            inp /= self.sphere_radius
-            if self.encoder: inp = self.encoder(inp)
-            inp = inp.reshape(inp.shape[0], -1)
-         
-            pred_cls, pred_dist = self.net(inp, t1, t2, None)
-            # print((pred_cls > 0).sum().item())
-            dist_update_mask = (pred_cls > 0) & (pred_dist < dist) & bvh_mask
-            dist[dist_update_mask] = pred_dist[dist_update_mask]
-
-            # dist_update_mask = (dist > t1) & bvh_mask
-            # dist[dist_update_mask] = t1[dist_update_mask]
-
-            # n_active_rays = 0
-
-        dist[dist == torch.inf] = 0
-
-        return dist > 0, dist
-
-
 @hydra.main(config_path="config", config_name="raytrace", version_base=None)
 def main(cfg):
-    print(f"Loading data from {cfg.dataset_class}")
     trainer = Trainer(cfg, tqdm_leave=True)
 
-    n_points = 128
+    n_points = 32
 
     encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=14, finest_resolution=256)
-    # encoder = HashGridLoRAEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256, rank=128)
-    # encoder = None
-
-    model = TransformerModel(cfg, encoder, 32, 6, n_points, use_tcnn=False, attn=True, norm=True, use_bvh=True)
-    # model = MLPModel(cfg, encoder, 128, 6, n_points, use_tcnn=True, norm=True)
-    # model = BVHModel(cfg, n_points, encoder)
+    model = TransformerModel(cfg, encoder, 32, 6, n_points, use_tcnn=False, attn=True, norm=True, use_bvh=False)
 
     name = "exp5"
     trainer.set_model(model, name)
     trainer.cam()
-    results = trainer.get_results(10)
-    print(results)
+    for i in range(10):
+        trainer.train()
+        trainer.val()
+        trainer.cam()
 
 
 if __name__ == "__main__":
