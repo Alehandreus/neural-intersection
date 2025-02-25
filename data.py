@@ -70,7 +70,7 @@ class BlenderDataset(Dataset):
     def __getitem__(self, index):
         item = {
             'ray_origins': self.rays[index, :3],
-            'ray_vectors': self.rays[index, 3:],
+            'ray_vectors': self.rays[index, 3:] / torch.norm(self.rays[index, 3:]),
             'mask': self.masks[index].squeeze(1),
             't': self.dists[index].squeeze(1),
         }
@@ -84,7 +84,7 @@ class BlenderDataset(Dataset):
         r = l + self.cfg.batch_size
         item = {
             'ray_origins': self.rays[l:r, :3],
-            'ray_vectors': self.rays[l:r, 3:],
+            'ray_vectors': self.rays[l:r, 3:] / torch.norm(self.rays[l:r, 3:]),
             'mask': self.masks[l:r].squeeze(1),
             't': self.dists[l:r].squeeze(1),
         }
@@ -131,7 +131,7 @@ class RayTraceDataset(Dataset):
             print(f"Bounding sphere radius: {self.sphere_radius:.2f}")
 
         builder = CPUBuilder(mesh)
-        self.bvh_data = builder.build_bvh(cfg.mesh.bvh_depth)
+        self.bvh_data = builder.build_bvh(cfg.mesh.bvh_gen_depth)
         self.bvh = GPUTraverser(self.bvh_data)
 
         if mode == "train":

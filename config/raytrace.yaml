@@ -4,7 +4,8 @@ log_dir: runs7
 mesh:
   path: "datasets/lego_mesh/lego_decimated.stl"
   split_faces: 0.8
-  bvh_depth: 25
+  bvh_gen_depth: 25
+  bvh_depth: 15
 
 train:
   lr: 0.001
@@ -17,4 +18,4 @@ val:
 
 cam:
   img_size: 800
-  batch_size: 10000
+  batch_size: 160000
