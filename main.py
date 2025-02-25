@@ -18,19 +18,18 @@ from nbvh_model import NBVHModel
 from trainer import Trainer
 
 
-torch.set_float32_matmul_precision("high") 
-
-
-@hydra.main(config_path="config", config_name="raytrace", version_base=None)
+@hydra.main(config_path="config", config_name="nbvh", version_base=None)
 def main(cfg):
+    torch.set_float32_matmul_precision("high") 
+
     trainer = Trainer(cfg, tqdm_leave=True)
 
-    n_points = 256
+    n_points = 16
 
     encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=14, finest_resolution=256)
 
     # model = TransformerModel(cfg, encoder, 32, 6, n_points, use_tcnn=False, attn=True, norm=True, use_bvh=True)
-    model = NBVHModel(cfg, encoder, 128, 8, n_points=4, norm=True)
+    model = NBVHModel(cfg, encoder, 128, 8, n_points, norm=True)
 
     name = "exp5"
     trainer.set_model(model, name)

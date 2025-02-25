@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from myutils.misc import MetricLogger, get_num_params
-from data import RayTraceDataset, BlenderDataset
+from data import RayTraceDataset, BlenderDataset, NBVHDataset
 
 
 class Trainer:
@@ -24,6 +24,15 @@ class Trainer:
             self.ds_train = RayTraceDataset(cfg, "train")
             self.ds_val = RayTraceDataset(cfg, "val")
             self.ds_cam = RayTraceDataset(cfg, "cam")
+
+        # generate rays in bvh leaves
+        elif self.cfg.mode == "nbvh":
+            self.ds_train = NBVHDataset(cfg, "train")
+            self.ds_val = NBVHDataset(cfg, "val")
+            self.ds_cam = RayTraceDataset(cfg, "cam")
+        
+        else:
+            raise ValueError(f"Unknown trainer mode: {self.cfg.mode}")
 
         self.tqdm_leave = tqdm_leave
 

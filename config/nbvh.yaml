@@ -1,0 +1,21 @@
+mode: nbvh
+log_dir: runs7
+
+mesh:
+  path: "suzanne.fbx"
+  split_faces: 0.8
+  bvh_gen_depth: 5
+  bvh_depth: 5
+
+train:
+  lr: 0.001
+  total_size: 50000000
+  batch_size: 100000
+
+val:
+  total_size: 1000000
+  batch_size: 10000
+
+cam:
+  img_size: 800
+  batch_size: 160000
