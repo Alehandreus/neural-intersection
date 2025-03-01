@@ -20,24 +20,37 @@ from trainer import Trainer
 
 @hydra.main(config_path="config", config_name="nbvh", version_base=None)
 def main(cfg):
-    torch.set_float32_matmul_precision("high") 
+    torch.set_float32_matmul_precision("high")
 
-    trainer = Trainer(cfg, tqdm_leave=True)
+    mesh = Mesh(cfg.mesh.path)
+    mesh.split_faces(cfg.mesh.split_faces)
+    builder = CPUBuilder(mesh)
+    bvh_data = builder.build_bvh(cfg.mesh.bvh_depth)
+    bvh_data.save_as_obj("bvh.obj")
+
+    bvh = GPUTraverser(bvh_data)
+    bvh.init_rand_state(cfg.train.total_size)
+
+    trainer = Trainer(cfg, tqdm_leave=True, bvh=bvh)
 
     n_points = 16
 
     encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=14, finest_resolution=256)
+    # encoder = None
 
     # model = TransformerModel(cfg, encoder, 32, 6, n_points, use_tcnn=False, attn=True, norm=True, use_bvh=True)
-    model = NBVHModel(cfg, encoder, 128, 8, n_points, norm=True)
+    model = NBVHModel(cfg, encoder, 128, 8, n_points, bvh=bvh, norm=False)
 
     name = "exp5"
     trainer.set_model(model, name)
-    trainer.cam()
-    for i in range(10):
+    trainer.cam(initial=True)
+    for i in range(100):
         trainer.train()
         trainer.val()
         trainer.cam()
+
+        if i % 2 == 1:
+            bvh.grow_nbvh(1)
 
 
 if __name__ == "__main__":

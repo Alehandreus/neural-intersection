@@ -8,7 +8,7 @@ from data import RayTraceDataset, BlenderDataset, NBVHDataset
 
 
 class Trainer:
-    def __init__(self, cfg, tqdm_leave=True):
+    def __init__(self, cfg, tqdm_leave=True, bvh=None):
         self.cfg = cfg
 
         self.img_size = cfg.cam.img_size
@@ -21,15 +21,15 @@ class Trainer:
 
         # generate rays on the fly with bvh
         elif self.cfg.mode == "raytrace":
-            self.ds_train = RayTraceDataset(cfg, "train")
-            self.ds_val = RayTraceDataset(cfg, "val")
-            self.ds_cam = RayTraceDataset(cfg, "cam")
+            self.ds_train = RayTraceDataset(cfg, "train", bvh=bvh)
+            self.ds_val = RayTraceDataset(cfg, "val", bvh=bvh)
+            self.ds_cam = RayTraceDataset(cfg, "cam", bvh=bvh)
 
         # generate rays in bvh leaves
         elif self.cfg.mode == "nbvh":
-            self.ds_train = NBVHDataset(cfg, "train")
-            self.ds_val = NBVHDataset(cfg, "val")
-            self.ds_cam = RayTraceDataset(cfg, "cam")
+            self.ds_train = NBVHDataset(cfg, "train", bvh=bvh)
+            self.ds_val = NBVHDataset(cfg, "val", bvh=bvh)
+            self.ds_cam = RayTraceDataset(cfg, "cam", bvh=bvh)
         
         else:
             raise ValueError(f"Unknown trainer mode: {self.cfg.mode}")
@@ -119,7 +119,7 @@ class Trainer:
         self.writer.add_scalar("MSE/val", val_mse, self.n_steps)
 
     @torch.no_grad()
-    def cam(self):
+    def cam(self, initial=False):
         img_dist = torch.zeros((self.img_size * self.img_size, 1), device="cuda")
         img_mask_pred = torch.zeros((self.img_size * self.img_size, 1), device="cuda")
         img_dist_pred = torch.zeros((self.img_size * self.img_size, 1), device="cuda")
@@ -127,7 +127,7 @@ class Trainer:
         bar = tqdm(range(self.ds_cam.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_cam.get_batch(batch_idx)
-            mask_pred, dist_pred = self.model(batch['ray_origins'], batch['ray_vectors'])
+            mask_pred, dist_pred = self.model(batch['ray_origins'], batch['ray_vectors'], initial=initial)
 
             batch_size = mask_pred.shape[0]
             img_mask_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = mask_pred[:, None]
@@ -137,6 +137,9 @@ class Trainer:
         img_dist = img_dist.reshape(1, self.img_size, self.img_size, 1)
         img_mask_pred = img_mask_pred.reshape(1, self.img_size, self.img_size, 1)
         img_dist_pred = img_dist_pred.reshape(1, self.img_size, self.img_size, 1) * (img_mask_pred > 0)
+
+        mse = ((img_dist - img_dist_pred) ** 2).mean()
+        print(f"Cam mse: {mse:.3f}")
 
         fig, ax = plt.subplots(1, 2, figsize=(10, 5))
         ax[0].axis("off")

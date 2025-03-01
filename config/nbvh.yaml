@@ -2,15 +2,14 @@ mode: nbvh
 log_dir: runs7
 
 mesh:
-  path: "suzanne.fbx"
+  path: "lego_decimated.stl"
   split_faces: 0.8
-  bvh_gen_depth: 5
-  bvh_depth: 5
+  bvh_depth: 25
 
 train:
   lr: 0.001
   total_size: 50000000
-  batch_size: 100000
+  batch_size: 200000
 
 val:
   total_size: 1000000

@@ -110,7 +110,7 @@ class BlenderDataset(Dataset):
 
 
 class RayTraceDataset(Dataset):
-    def __init__(self, cfg, mode):
+    def __init__(self, cfg, mode, bvh=None):
         super().__init__()
 
         assert mode in ['train', 'val', 'cam']
@@ -126,13 +126,14 @@ class RayTraceDataset(Dataset):
         self.mesh_center = (mesh_min + mesh_max) * 0.5
         self.sphere_radius = torch.norm(mesh_max - mesh_min) * 0.5
 
+        builder = CPUBuilder(mesh)
+        self.bvh_data = builder.build_bvh(cfg.mesh.bvh_depth)
+        self.bvh = GPUTraverser(self.bvh_data)
+
         if mode == "train":
             print(f"Mesh center: [{self.mesh_center[0]:.2f}, {self.mesh_center[1]:.2f}, {self.mesh_center[2]:.2f}]")
             print(f"Bounding sphere radius: {self.sphere_radius:.2f}")
-
-        builder = CPUBuilder(mesh)
-        self.bvh_data = builder.build_bvh(cfg.mesh.bvh_gen_depth)
-        self.bvh = GPUTraverser(self.bvh_data)
+            self.bvh_data.save_as_obj("bvh.obj")
 
         if mode == "train":
             self.total_size = cfg[mode].total_size
@@ -222,7 +223,7 @@ class RayTraceDataset(Dataset):
 
 
 class NBVHDataset(Dataset):
-    def __init__(self, cfg, mode):
+    def __init__(self, cfg, mode, bvh):
         super().__init__()
 
         assert mode in ['train', 'val', 'cam']
@@ -238,24 +239,16 @@ class NBVHDataset(Dataset):
         self.mesh_center = (mesh_min + mesh_max) * 0.5
         self.sphere_radius = torch.norm(mesh_max - mesh_min) * 0.5
 
-        if mode == "train":
-            print(f"Mesh center: [{self.mesh_center[0]:.2f}, {self.mesh_center[1]:.2f}, {self.mesh_center[2]:.2f}]")
-            print(f"Bounding sphere radius: {self.sphere_radius:.2f}")
-
-        builder = CPUBuilder(mesh)
-        self.bvh_data = builder.build_bvh(cfg.mesh.bvh_gen_depth)
-        self.bvh = GPUTraverser(self.bvh_data)
+        self.bvh = bvh
 
         if mode == "train":
             self.batch_size = cfg[mode].batch_size
             self.total_size = cfg[mode].total_size
-            self.bvh.init_rand_state(self.total_size)
             pass # we will generate data on the fly
 
         elif mode == "val":
             self.batch_size = cfg[mode].batch_size
             self.total_size = cfg[mode].total_size
-            self.bvh.init_rand_state(self.total_size)
 
             print("Generating rays for validation set...", end=" ", flush=True)
             data = self.generate_rays(self.total_size)
