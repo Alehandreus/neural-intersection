@@ -1,5 +1,5 @@
 mode: nbvh
-log_dir: runs7
+log_dir: runs8
 
 mesh:
   path: "lego_decimated.stl"

@@ -257,6 +257,7 @@ class NBVHDataset(Dataset):
 
             self.ray_origins = data['ray_origins']
             self.ray_ends = data['ray_ends']
+            self.bbox_idxs = data['bbox_idxs']
             self.mask = data['mask']
             self.t = data['t']
 
@@ -265,11 +266,12 @@ class NBVHDataset(Dataset):
             exit()
 
     def generate_rays(self, n):
-        ray_origins, ray_ends, mask, t = self.bvh.bbox_raygen(n)
+        ray_origins, ray_ends, bbox_idxs, mask, t = self.bvh.bbox_raygen(n)
 
         return {
             'ray_origins': ray_origins,
             'ray_ends': ray_ends,
+            'bbox_idxs': bbox_idxs.long(),
             'mask': mask,
             't': t
         }  
@@ -281,6 +283,7 @@ class NBVHDataset(Dataset):
         return {
             'ray_origins': self.ray_origins[index],
             'ray_vectors': self.ray_ends[index],
+            'bbox_idxs': self.bbox_idxs[index],
             'mask': self.mask[index],
             't': self.t[index]
         }
@@ -296,17 +299,17 @@ class NBVHDataset(Dataset):
             return {
                 'ray_origins': self.ray_origins[s:e],
                 'ray_vectors': self.ray_ends[s:e],
+                'bbox_idxs': self.bbox_idxs[s:e],
                 'mask': self.mask[s:e],
                 't': self.t[s:e]
             }
 
-        ray_origins, ray_ends, mask, t = self.bvh.bbox_raygen(self.batch_size)
-
-        # print(ray_origins[0])
+        ray_origins, ray_ends, bbox_idxs, mask, t = self.bvh.bbox_raygen(self.batch_size)
 
         return {
             'ray_origins': ray_origins,
             'ray_vectors': ray_ends,
+            'bbox_idxs': bbox_idxs,
             'mask': mask,
             't': t
         }
@@ -314,14 +317,3 @@ class NBVHDataset(Dataset):
     
     def shuffle(self):
         pass
-        # assert self.mode == "train"
-
-        # print("Generating rays for training set...", end=" ", flush=True)
-        # data = self.generate_rays(self.total_size)
-        # torch.cuda.synchronize()
-        # print("Done!")
-
-        # self.ray_origins = data['ray_origins']
-        # self.ray_ends = data['ray_ends']
-        # self.mask = data['mask']
-        # self.t = data['t']

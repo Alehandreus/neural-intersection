@@ -39,17 +39,19 @@ def main(cfg):
     # encoder = None
 
     # model = TransformerModel(cfg, encoder, 32, 6, n_points, use_tcnn=False, attn=True, norm=True, use_bvh=True)
-    model = NBVHModel(cfg, encoder, 128, 8, n_points, bvh=bvh, norm=False)
+    model = NBVHModel(cfg, encoder, 128, 8, n_points, bvh_data=bvh_data, bvh=bvh, norm=False)
 
-    name = "exp5"
+    name = "exp6"
     trainer.set_model(model, name)
     trainer.cam(initial=True)
     for i in range(100):
+        print("Epoch", i)
         trainer.train()
         trainer.val()
         trainer.cam()
 
-        if i % 2 == 1:
+        # if i % 2 == 1:
+        if i > 0 and i < 10:
             bvh.grow_nbvh(1)
 
 

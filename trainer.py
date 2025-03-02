@@ -75,7 +75,7 @@ class Trainer:
         bar = tqdm(range(self.ds_train.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_train.get_batch(batch_idx)
-            loss, acc, mse = self.model.get_loss(batch['ray_origins'], batch['ray_vectors'], batch['mask'], batch['t'])
+            loss, acc, mse = self.model.get_loss(batch['ray_origins'], batch['ray_vectors'], batch['bbox_idxs'], batch['mask'], batch['t'])
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -102,7 +102,7 @@ class Trainer:
         bar = tqdm(range(self.ds_val.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_val.get_batch(batch_idx)
-            loss, acc, mse = self.model.get_loss(batch['ray_origins'], batch['ray_vectors'], batch['mask'], batch['t'])
+            loss, acc, mse = self.model.get_loss(batch['ray_origins'], batch['ray_vectors'], batch['bbox_idxs'], batch['mask'], batch['t'])
 
             val_loss += loss.item()
             val_acc += acc
@@ -140,6 +140,8 @@ class Trainer:
 
         mse = ((img_dist - img_dist_pred) ** 2).mean()
         print(f"Cam mse: {mse:.3f}")
+
+        self.writer.add_scalar("MSE/cam", mse.item(), self.n_steps)
 
         fig, ax = plt.subplots(1, 2, figsize=(10, 5))
         ax[0].axis("off")
