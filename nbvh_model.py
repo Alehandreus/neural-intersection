@@ -57,11 +57,6 @@ class NBVHModel(nn.Module):
 
         self.net = nn.ModuleList([self.layers, self.cls, self.dist])
 
-        # self.bbox_feature_dim = 64
-        # print(f"Allocating {self.bvh_data.n_nodes} bbox features")
-        # self.bbox_features = nn.Parameter(torch.randn((self.bvh_data.n_nodes, self.bbox_feature_dim), device="cuda") * 0.01, requires_grad=True)
-        # self.bbox_features_up = nn.Linear(self.bbox_feature_dim, self.n_points * 32)
-
         self.cuda()
 
     def net_forward(self, x, bbox_idxs, initial=False):
@@ -69,11 +64,6 @@ class NBVHModel(nn.Module):
             x = self.encoder(x)
 
         x = x.reshape(x.shape[0], -1)
-
-        # bbox_features = self.bbox_features.gather(0, bbox_idxs[:, None].expand(-1, self.bbox_feature_dim))
-        # bbox_features = self.bbox_features_up(bbox_features)
-        # x = x + bbox_features
-        # x = torch.cat([x, bbox_features], dim=-1)
 
         y = self.layers(x)
 
@@ -93,35 +83,20 @@ class NBVHModel(nn.Module):
         bbox_idxs = bbox_idxs.long()
         n_rays = orig.shape[0]
 
-        # inp = torch.cat([orig, end], dim=-1)
         ts = torch.linspace(0, 1, self.n_points, device="cuda")
         inp = orig[..., None, :] + (end - orig)[..., None, :] * ts[None, :, None]
-        # inp = (inp - self.mesh_min) / (self.mesh_max - self.mesh_min)
-        # inp /= self.sphere_radius
-        # inp /= self.sphere_radius * 2
         min_infl = self.mesh_min - 0.5 * (self.mesh_max - self.mesh_min)
         max_infl = self.mesh_max + 0.5 * (self.mesh_max - self.mesh_min)
         inp = (inp - min_infl) / (max_infl - min_infl)
 
         pred_cls, pred_dist = self.net_forward(inp, bbox_idxs)
-
-        # print(hit_mask.float().mean(), (pred_cls > 0).float().mean())
         
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float())#, weight=hit_mask.float() * 0.9 + 0.1)
         mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask]) if hit_mask.sum() > 0 else torch.tensor(0, device="cuda", dtype=torch.float32)
 
-        # print(pred_dist[hit_mask].max(), pred_dist[hit_mask].min())
-        # print(dist[hit_mask].max(), dist[hit_mask].min())
-        # print(mse_loss)
-        # print()
-
-        # print(hit_mask.sum())
-
         acc = ((pred_cls > 0) == hit_mask).sum().item() / n_rays if n_rays > 0 else 0
 
         loss = cls_loss + mse_loss
-        # if acc > 0.8:
-        # loss += mse_loss
 
         return loss, acc, mse_loss
 
@@ -139,14 +114,9 @@ class NBVHModel(nn.Module):
             inp_vec = vec * (cur_t2 - cur_t1)[:, None]
             ts = torch.linspace(0, 1, self.n_points, device="cuda")
             inp = inp_orig[..., None, :] + inp_vec[..., None, :] * ts[None, :, None]
-            # inp /= self.sphere_radius
-            # inp = (inp - self.mesh_min) / (self.mesh_max - self.mesh_min)
-            # inp /= self.sphere_radius * 2
             min_infl = self.mesh_min - 0.5 * (self.mesh_max - self.mesh_min)
             max_infl = self.mesh_max + 0.5 * (self.mesh_max - self.mesh_min)
             inp = (inp - min_infl) / (max_infl - min_infl)
-
-            # inp = (inp - self.mesh_min) / (self.mesh_max - self.mesh_min)
 
             inp_c = inp[cur_mask]
             bbox_idxs_c = cur_bbox_idxs[cur_mask]
@@ -154,8 +124,6 @@ class NBVHModel(nn.Module):
             hit = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, hit_c)
             dist_val = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, dist_val_c)
 
-            # hit, dist_val = self.net_forward(inp)
-            # dist_val = dist_val * (cur_t2 - cur_t1) + cur_t1
             dist_val = dist_val + cur_t1
 
             update_mask = (hit > 0) & (dist_val < dist) & cur_mask
