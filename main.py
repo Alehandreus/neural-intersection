@@ -33,13 +33,13 @@ def main(cfg):
 
     trainer = Trainer(cfg, tqdm_leave=True, bvh=bvh)
 
-    n_points = 16
+    n_points = 8
 
     encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=14, finest_resolution=256)
     # encoder = None
 
     # model = TransformerModel(cfg, encoder, 32, 6, n_points, use_tcnn=False, attn=True, norm=True, use_bvh=True)
-    model = NBVHModel(cfg, encoder, 128, 8, n_points, bvh_data=bvh_data, bvh=bvh, norm=False)
+    model = NBVHModel(cfg, encoder, 24, 3, n_points, bvh_data=bvh_data, bvh=bvh, norm=False)
 
     name = "exp6"
     trainer.set_model(model, name)
@@ -51,7 +51,7 @@ def main(cfg):
         trainer.cam()
 
         # if i % 2 == 1:
-        if i > 0 and i < 10:
+        if i > 0 and i < 15:
             bvh.grow_nbvh(1)
 
 

@@ -1,9 +1,11 @@
 import time
 import torch
+from torch import nn
+from torch.nn import functional as F
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from myutils.misc import MetricLogger, get_num_params
+from myutils.misc import MetricLogger, get_num_params, cut_edges
 from data import RayTraceDataset, BlenderDataset, NBVHDataset
 
 
@@ -75,7 +77,8 @@ class Trainer:
         bar = tqdm(range(self.ds_train.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_train.get_batch(batch_idx)
-            loss, acc, mse = self.model.get_loss(batch['ray_origins'], batch['ray_vectors'], batch['bbox_idxs'], batch['mask'], batch['t'])
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                loss, acc, mse = self.model.get_loss(batch['ray_origins'], batch['ray_vectors'], batch['bbox_idxs'], batch['mask'], batch['t'])
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -137,6 +140,10 @@ class Trainer:
         img_dist = img_dist.reshape(1, self.img_size, self.img_size, 1)
         img_mask_pred = img_mask_pred.reshape(1, self.img_size, self.img_size, 1)
         img_dist_pred = img_dist_pred.reshape(1, self.img_size, self.img_size, 1) * (img_mask_pred > 0)
+
+        # img_dist = cut_edges(img_dist)
+        # img_dist_pred = cut_edges(img_dist_pred)
+        # mse_edge = F.mse_loss(img_dist, img_dist_pred).item()        
 
         mse = ((img_dist - img_dist_pred) ** 2).mean()
         print(f"Cam mse: {mse:.3f}")
