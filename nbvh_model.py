@@ -248,7 +248,7 @@ class MLPNet(nn.Module):
 
 
 class NBVHModel(nn.Module):
-    def __init__(self, cfg, encoder, dim, n_layers, n_points, bvh_data, bvh, norm=True):
+    def __init__(self, cfg, encoder, dim, n_layers, n_points, bvh_data, bvh, norm=True, n_nns_log=0):
         super().__init__()
 
         self.cfg = cfg
@@ -256,6 +256,9 @@ class NBVHModel(nn.Module):
         self.n_segments = n_points - 1
         self.dim = dim
         self.n_layers = n_layers
+
+        self.n_nns = 2 ** n_nns_log
+        self.n_nns_log = n_nns_log
 
         mesh = Mesh(cfg.mesh.path)
         mesh_min, mesh_max = mesh.bounds()
@@ -270,10 +273,17 @@ class NBVHModel(nn.Module):
 
         self.encoder = encoder
 
-        # self.net = MLPNet(n_points, encoder, dim, n_layers, norm=norm)
-        self.net = KMLPNet(n_points, encoder, dim, n_layers, norm=norm)
+        # self.nets = nn.ModuleList([
+        #     # KMLPNet(n_points, encoder, dim, n_layers, attn=True, norm=norm)
+        #     MLPNet(n_points, encoder, dim, n_layers, norm=norm)
+        #     for _ in range(self.n_nns)
+        # ])
+        # self.met = { 0 }
+        
+        self.net = MLPNet(n_points, encoder, dim, n_layers, norm=norm)
+        # self.net = KMLPNet(n_points, encoder, dim, n_layers, norm=norm)
 
-    def get_loss(self, orig, end, bbox_idxs, hit_mask, dist):
+    def get_loss(self, orig, end, bbox_idxs, nn_idxs, hit_mask, dist):
         bbox_idxs = bbox_idxs.long()
         n_rays = orig.shape[0]
 
@@ -288,7 +298,8 @@ class NBVHModel(nn.Module):
             loss, acc, mse_loss = self.net.get_loss(inp, lengths, hit_mask, dist)
             return loss, acc, mse_loss
 
-        pred_cls, pred_dist = self.net(inp, lengths)
+        pred_cls, pred_dist = self.net(inp, lengths, initial=False)
+        # pred_cls, pred_dist = self.nets_forward(inp, lengths, initial=False, nn_idxs=nn_idxs)
         
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float()) * 10 #, weight=hit_mask.float() * 0.9 + 0.1)
         mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask]) if hit_mask.sum() > 0 else torch.tensor(0, device="cuda", dtype=torch.float32)
@@ -298,6 +309,34 @@ class NBVHModel(nn.Module):
         loss = cls_loss + mse_loss
 
         return loss, acc, mse_loss
+    
+    def nets_forward(self, inp, lengths, initial, nn_idxs):
+        nn_idxs = nn_idxs.long()
+
+        hit = torch.zeros((inp.shape[0],), device="cuda")
+        dist = torch.zeros((inp.shape[0],), device="cuda")
+
+        # unique idxs in nn_idxs
+        unique_nn_idxs = torch.unique(nn_idxs).tolist()
+        for nn_i in unique_nn_idxs:
+            if nn_i not in self.met:
+                self.met.add(nn_i)
+                print(f"Copying {nn_i} from {nn_i // 2}")
+
+                self.nets[nn_i].load_state_dict(self.nets[nn_i // 2].state_dict())
+
+        for nn_i in range(self.n_nns):
+            net = self.nets[nn_i]
+            mask = (nn_idxs == nn_i)
+            if mask.sum() == 0:
+                continue
+            
+            # print(f"running {nn_i}, {inp[mask].shape}, {lengths[mask].shape}")
+            h, d = net.forward(inp[mask], lengths[mask], initial=initial)
+            hit = hit.masked_scatter(mask, h)
+            dist = dist.masked_scatter(mask, d)
+        
+        return hit, dist
 
     def forward(self, orig, vec, initial=False):
         n_rays = orig.shape[0]
@@ -305,9 +344,21 @@ class NBVHModel(nn.Module):
         dist = torch.ones((n_rays,), dtype=torch.float32).cuda() * 1e9
 
         self.bvh.reset_stack(n_rays)
-        alive, cur_mask, cur_bbox_idxs, cur_t1, cur_t2 = self.bvh.another_bbox_nbvh(orig, vec)
+        alive, cur_mask, cur_bbox_idxs, nn_idxs, cur_t1, cur_t2 = self.bvh.another_bbox_nbvh(orig, vec)
         while alive:
             cur_bbox_idxs = cur_bbox_idxs.long()
+            nn_idxs = nn_idxs.long()
+
+            # j = 0
+            # for i in range(len(cur_mask)):
+            #     if j >= 10:
+            #         break
+
+            #     if not cur_mask[i]:
+            #         continue
+                
+            #     j += 1
+            #     print(f"MASK {cur_mask[i]} BBOX {cur_bbox_idxs[i]} NN {nn_idxs[i]} T1 {cur_t1[i]:.3f} T2 {cur_t2[i]:.3f}")
 
             inp_orig = orig + vec * cur_t1[:, None]
             inp_vec = vec * (cur_t2 - cur_t1)[:, None]
@@ -319,7 +370,9 @@ class NBVHModel(nn.Module):
 
             inp_c = inp[cur_mask]
             bbox_idxs_c = cur_bbox_idxs[cur_mask]
+            nn_idxs_c = nn_idxs[cur_mask]
             lengths = inp_vec.norm(dim=-1)[cur_mask]
+            # hit_c, dist_val_c = self.nets_forward(inp_c, lengths, initial=initial, nn_idxs=nn_idxs_c)
             hit_c, dist_val_c = self.net(inp_c, lengths, initial=initial)
             hit = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, hit_c)
             dist_val = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, dist_val_c)
@@ -329,7 +382,7 @@ class NBVHModel(nn.Module):
             update_mask = (hit > 0) & (dist_val < dist) & cur_mask
             dist[update_mask] = dist_val[update_mask]
 
-            alive, cur_mask, cur_bbox_idxs, cur_t1, cur_t2 = self.bvh.another_bbox_nbvh(orig, vec)
+            alive, cur_mask, cur_bbox_idxs, nn_idxs, cur_t1, cur_t2 = self.bvh.another_bbox_nbvh(orig, vec)
         
         dist[dist == 1e9] = 0
 

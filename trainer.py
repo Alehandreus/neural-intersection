@@ -71,14 +71,16 @@ class Trainer:
 
         print(f"Total bytes: {total_bytes} ({total_bytes / 1e6:.3f}MB)")
 
+        print(f"Total params: {get_num_params(self.model)}")
+
     def train(self):
         self.ds_train.shuffle()
 
         bar = tqdm(range(self.ds_train.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_train.get_batch(batch_idx)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                loss, acc, mse = self.model.get_loss(batch['ray_origins'], batch['ray_vectors'], batch['bbox_idxs'], batch['mask'], batch['t'])
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=False):
+                loss, acc, mse = self.model.get_loss(batch['ray_origins'], batch['ray_vectors'], batch['bbox_idxs'], batch['nn_idxs'], batch['mask'], batch['t'])
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -105,7 +107,7 @@ class Trainer:
         bar = tqdm(range(self.ds_val.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_val.get_batch(batch_idx)
-            loss, acc, mse = self.model.get_loss(batch['ray_origins'], batch['ray_vectors'], batch['bbox_idxs'], batch['mask'], batch['t'])
+            loss, acc, mse = self.model.get_loss(batch['ray_origins'], batch['ray_vectors'], batch['bbox_idxs'], batch['nn_idxs'], batch['mask'], batch['t'])
 
             val_loss += loss.item()
             val_acc += acc
