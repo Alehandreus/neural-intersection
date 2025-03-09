@@ -10,6 +10,8 @@ from myutils.modules import TransformerBlock, AttentionPooling, MeanPooling, Has
 from myutils.misc import *
 from myutils.ray import *
 
+BBOX_FEATURE_DIM = 2
+
 
 class KMLPNet(nn.Module):
     def __init__(self, n_points, encoder, dim, n_layers, attn=False, norm=False, use_tcnn=False):
@@ -224,13 +226,16 @@ class MLPNet(nn.Module):
 
         dummy_input = torch.randn((10, self.n_points, 3), device="cuda")
         dummy_lengths = torch.randn((10,), device="cuda") ** 2
-        self.forward(dummy_input, dummy_lengths)
+        bbox_feature = torch.randn((10, BBOX_FEATURE_DIM), device="cuda")
+        self.forward(dummy_input, bbox_feature, dummy_lengths)
 
-    def forward(self, x, lengths, initial=False):
+    def forward(self, x, bbox_feature, lengths, initial=False):
         if self.encoder:
             x = self.encoder(x)
 
         x = x.reshape(x.shape[0], -1)
+
+        x = torch.cat([x, bbox_feature], dim=1)
 
         y = self.layers(x)
 
@@ -273,6 +278,10 @@ class NBVHModel(nn.Module):
 
         self.encoder = encoder
 
+        bbox_feature_dim = BBOX_FEATURE_DIM
+        # self.bbox_features = nn.Parameter(torch.randn((self.bvh_data.n_nodes, bbox_feature_dim)), requires_grad=True)
+        self.bbox_features = nn.Embedding(self.bvh_data.n_nodes, bbox_feature_dim)
+
         # self.nets = nn.ModuleList([
         #     # KMLPNet(n_points, encoder, dim, n_layers, attn=True, norm=norm)
         #     MLPNet(n_points, encoder, dim, n_layers, norm=norm)
@@ -282,6 +291,8 @@ class NBVHModel(nn.Module):
         
         self.net = MLPNet(n_points, encoder, dim, n_layers, norm=norm)
         # self.net = KMLPNet(n_points, encoder, dim, n_layers, norm=norm)
+
+        self.cuda()
 
     def get_loss(self, orig, end, bbox_idxs, nn_idxs, hit_mask, dist):
         bbox_idxs = bbox_idxs.long()
@@ -294,11 +305,19 @@ class NBVHModel(nn.Module):
         inp = (inp - min_infl) / (max_infl - min_infl)
         lengths = (end - orig).norm(dim=-1)
 
-        if hasattr(self.net, "get_loss"):
-            loss, acc, mse_loss = self.net.get_loss(inp, lengths, hit_mask, dist)
-            return loss, acc, mse_loss
+        # if hasattr(self.net, "get_loss"):
+        #     loss, acc, mse_loss = self.net.get_loss(inp, lengths, hit_mask, dist)
+        #     return loss, acc, mse_loss
 
-        pred_cls, pred_dist = self.net(inp, lengths, initial=False)
+        # print(self.bbox_features.weight)
+
+        bbox_feature = torch.zeros((bbox_idxs.shape[0], BBOX_FEATURE_DIM), device="cuda")
+        bbox_feature[hit_mask] = self.bbox_features(bbox_idxs[hit_mask])
+        # print(bbox_idxs[hit_mask])
+        # print(self.bbox_features.shape)
+        # print(bbox_feature)
+
+        pred_cls, pred_dist = self.net(inp, bbox_feature, lengths, initial=False)
         # pred_cls, pred_dist = self.nets_forward(inp, lengths, initial=False, nn_idxs=nn_idxs)
         
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float()) * 10 #, weight=hit_mask.float() * 0.9 + 0.1)
@@ -310,33 +329,33 @@ class NBVHModel(nn.Module):
 
         return loss, acc, mse_loss
     
-    def nets_forward(self, inp, lengths, initial, nn_idxs):
-        nn_idxs = nn_idxs.long()
+    # def nets_forward(self, inp, lengths, initial, nn_idxs):
+    #     nn_idxs = nn_idxs.long()
 
-        hit = torch.zeros((inp.shape[0],), device="cuda")
-        dist = torch.zeros((inp.shape[0],), device="cuda")
+    #     hit = torch.zeros((inp.shape[0],), device="cuda")
+    #     dist = torch.zeros((inp.shape[0],), device="cuda")
 
-        # unique idxs in nn_idxs
-        unique_nn_idxs = torch.unique(nn_idxs).tolist()
-        for nn_i in unique_nn_idxs:
-            if nn_i not in self.met:
-                self.met.add(nn_i)
-                print(f"Copying {nn_i} from {nn_i // 2}")
+    #     # unique idxs in nn_idxs
+    #     unique_nn_idxs = torch.unique(nn_idxs).tolist()
+    #     for nn_i in unique_nn_idxs:
+    #         if nn_i not in self.met:
+    #             self.met.add(nn_i)
+    #             print(f"Copying {nn_i} from {nn_i // 2}")
 
-                self.nets[nn_i].load_state_dict(self.nets[nn_i // 2].state_dict())
+    #             self.nets[nn_i].load_state_dict(self.nets[nn_i // 2].state_dict())
 
-        for nn_i in range(self.n_nns):
-            net = self.nets[nn_i]
-            mask = (nn_idxs == nn_i)
-            if mask.sum() == 0:
-                continue
+    #     for nn_i in range(self.n_nns):
+    #         net = self.nets[nn_i]
+    #         mask = (nn_idxs == nn_i)
+    #         if mask.sum() == 0:
+    #             continue
             
-            # print(f"running {nn_i}, {inp[mask].shape}, {lengths[mask].shape}")
-            h, d = net.forward(inp[mask], lengths[mask], initial=initial)
-            hit = hit.masked_scatter(mask, h)
-            dist = dist.masked_scatter(mask, d)
+    #         # print(f"running {nn_i}, {inp[mask].shape}, {lengths[mask].shape}")
+    #         h, d = net.forward(inp[mask], lengths[mask], initial=initial)
+    #         hit = hit.masked_scatter(mask, h)
+    #         dist = dist.masked_scatter(mask, d)
         
-        return hit, dist
+    #     return hit, dist
 
     def forward(self, orig, vec, initial=False):
         n_rays = orig.shape[0]
@@ -373,7 +392,9 @@ class NBVHModel(nn.Module):
             nn_idxs_c = nn_idxs[cur_mask]
             lengths = inp_vec.norm(dim=-1)[cur_mask]
             # hit_c, dist_val_c = self.nets_forward(inp_c, lengths, initial=initial, nn_idxs=nn_idxs_c)
-            hit_c, dist_val_c = self.net(inp_c, lengths, initial=initial)
+            # bbox_feature = self.bbox_features(bbox_idxs_c)
+            bbox_feature = self.bbox_features(bbox_idxs_c)
+            hit_c, dist_val_c = self.net(inp_c, bbox_feature, lengths, initial=initial)
             hit = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, hit_c)
             dist_val = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, dist_val_c)
 

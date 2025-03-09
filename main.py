@@ -37,17 +37,17 @@ def main(cfg):
 
     n_points = 16
 
-    encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=384)
+    encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=14, finest_resolution=256)
     # encoder = None
 
     # model = TransformerModel(cfg, encoder, 32, 6, n_points, use_tcnn=False, attn=True, norm=True, use_bvh=True)
     # model = NBVHModel(cfg, encoder, 24, 3, n_points, bvh_data=bvh_data, bvh=bvh, norm=False, n_nns_log=n_nns_log)
-    model = NBVHModel(cfg, encoder, 192, 8, n_points, bvh_data=bvh_data, bvh=bvh, norm=False, n_nns_log=n_nns_log)
+    model = NBVHModel(cfg, encoder, 128, 6, n_points, bvh_data=bvh_data, bvh=bvh, norm=False, n_nns_log=n_nns_log)
 
     name = "exp5"
     trainer.set_model(model, name)
     bvh.assign_nns(0, 0, n_nns_log)
-    # bvh.grow_nbvh(5)
+    bvh.grow_nbvh(10)
     trainer.cam(initial=True)
     # exit()
     for i in range(100):
