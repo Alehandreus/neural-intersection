@@ -236,6 +236,7 @@ class MLPNet(nn.Module):
         x = x.reshape(x.shape[0], -1)
 
         x = torch.cat([x, bbox_feature], dim=1)
+        # x = torch.cat([x, torch.zeros((x.shape[0], BBOX_FEATURE_DIM), device="cuda")], dim=1)
 
         y = self.layers(x)
 
@@ -281,6 +282,7 @@ class NBVHModel(nn.Module):
         bbox_feature_dim = BBOX_FEATURE_DIM
         # self.bbox_features = nn.Parameter(torch.randn((self.bvh_data.n_nodes, bbox_feature_dim)), requires_grad=True)
         self.bbox_features = nn.Embedding(self.bvh_data.n_nodes, bbox_feature_dim)
+        self.bbox_features.requires_grad_(False)
 
         # self.nets = nn.ModuleList([
         #     # KMLPNet(n_points, encoder, dim, n_layers, attn=True, norm=norm)
@@ -311,8 +313,12 @@ class NBVHModel(nn.Module):
 
         # print(self.bbox_features.weight)
 
-        bbox_feature = torch.zeros((bbox_idxs.shape[0], BBOX_FEATURE_DIM), device="cuda")
-        bbox_feature[hit_mask] = self.bbox_features(bbox_idxs[hit_mask])
+        # for i in range(100):
+        #     print(bbox_idxs[i], hit_mask[i])
+
+        # bbox_feature = torch.zeros((bbox_idxs.shape[0], BBOX_FEATURE_DIM), device="cuda")
+        # bbox_feature[hit_mask] = self.bbox_features(bbox_idxs[hit_mask])
+        bbox_feature = self.bbox_features(bbox_idxs)
         # print(bbox_idxs[hit_mask])
         # print(self.bbox_features.shape)
         # print(bbox_feature)
@@ -367,6 +373,9 @@ class NBVHModel(nn.Module):
         while alive:
             cur_bbox_idxs = cur_bbox_idxs.long()
             nn_idxs = nn_idxs.long()
+
+            # for i in range(100):
+            #     print(cur_bbox_idxs[i], cur_mask[i])
 
             # j = 0
             # for i in range(len(cur_mask)):
