@@ -28,6 +28,9 @@ def main(cfg):
     bvh_data = builder.build_bvh(cfg.mesh.bvh_depth)
     bvh_data.save_as_obj("bvh.obj")
 
+    print("BVH nodes:", bvh_data.n_nodes)
+    print("BVH leaves:", bvh_data.n_leaves)
+
     bvh = GPUTraverser(bvh_data)
     bvh.init_rand_state(cfg.train.total_size)
 
@@ -35,19 +38,19 @@ def main(cfg):
 
     n_nns_log = 0
 
-    n_points = 16
+    n_points = 8
 
-    encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=14, finest_resolution=256)
-    # encoder = None
+    # encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256)
+    encoder = None
 
     # model = TransformerModel(cfg, encoder, 32, 6, n_points, use_tcnn=False, attn=True, norm=True, use_bvh=True)
     # model = NBVHModel(cfg, encoder, 24, 3, n_points, bvh_data=bvh_data, bvh=bvh, norm=False, n_nns_log=n_nns_log)
-    model = NBVHModel(cfg, encoder, 128, 6, n_points, bvh_data=bvh_data, bvh=bvh, norm=False, n_nns_log=n_nns_log)
+    model = NBVHModel(cfg, encoder, 256, 8, n_points, bvh_data=bvh_data, bvh=bvh, norm=False, n_nns_log=n_nns_log)
 
     name = "exp5"
     trainer.set_model(model, name)
     bvh.assign_nns(0, 0, n_nns_log)
-    bvh.grow_nbvh(10)
+    bvh.grow_nbvh(11)
     trainer.cam(initial=True)
     # exit()
     for i in range(100):
@@ -57,8 +60,10 @@ def main(cfg):
         trainer.cam()
 
         # if i % 2 == 1:
-        if i > 0 and i < 15:
-            bvh.grow_nbvh(1)
+        # if i > 0 and i < 15:
+        #     bvh.grow_nbvh(1)
+        # if i < 20:
+        #     bvh.grow_nbvh(1)
 
         # if i > 0 and i < 4:
         #     bvh.assign_nns(0, 0, i)

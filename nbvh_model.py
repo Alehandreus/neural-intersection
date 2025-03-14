@@ -10,193 +10,8 @@ from myutils.modules import TransformerBlock, AttentionPooling, MeanPooling, Has
 from myutils.misc import *
 from myutils.ray import *
 
-BBOX_FEATURE_DIM = 2
 
-
-class KMLPNet(nn.Module):
-    def __init__(self, n_points, encoder, dim, n_layers, attn=False, norm=False, use_tcnn=False):
-        super().__init__()
-
-        self.encoder = encoder
-        self.n_points = n_points
-
-        self.dim = dim
-        self.n_layers = n_layers
-
-        self.attn = attn
-        self.norm = norm
-        self.use_tcnn = use_tcnn
-
-        self.up = nn.LazyLinear(self.dim)
-
-        if attn or norm or not use_tcnn:
-            self.layers = nn.Sequential(*[
-                TransformerBlock(dim=dim, attn=attn, norm=norm, use_tcnn=use_tcnn)
-                for _ in range(n_layers)
-            ])
-        else:
-            self.layers = tcnn.Network(dim, dim, {
-                "otype": "CutlassMLP",
-                "activation": "ReLU",
-                "output_activation": "None",
-                "n_neurons": dim,
-                "n_hidden_layers": 6 * n_layers - 2,
-            })
-
-        self.cls = nn.Sequential(
-            AttentionPooling(self.dim) if attn else MeanPooling(),
-            nn.Linear(self.dim, 1),
-        )
-        self.dist_cls = nn.Linear(self.dim, 1)
-        self.dist_val = nn.Linear(self.dim, 1)
-        self.dist = nn.Sequential(
-            AttentionPooling(self.dim) if attn else MeanPooling(),
-            nn.Linear(self.dim, 1),
-        )
-        self.net = nn.ModuleList([
-            self.up,
-            self.layers,
-            self.cls,
-            self.dist_cls,
-            self.dist_val,
-            self.dist,
-        ])
-
-        self.cuda()
-
-        dummy_input = torch.randn((10, self.n_points, 3), device="cuda")
-        dummy_lengths = torch.randn((10,), device="cuda") ** 2
-        self.forward(dummy_input, dummy_lengths)
-
-    def encode_points(self, x):
-        # orig = points[..., :3]
-        # vec = points[..., 3:] - points[..., :3]
-        # vec = vec / vec.norm(dim=-1, keepdim=True)
-    
-        # t1, t2, mask = to_sphere_torch(orig, vec, self.sphere_center, self.sphere_radius)
-
-        # orig = orig + vec * t1
-        # vec = vec * (t2 - t1)
-        # ts = torch.linspace(0, 1, self.n_points, device="cuda")
-        # x = orig[..., None, :] + vec[..., None, :] * ts[None, :, None]
-
-        # x = x.reshape(x.shape[0], -1)
-        # x = x / self.sphere_radius
-
-        if self.encoder:
-            x = self.encoder(x)
-
-        return x#, mask, t1, t2        
-
-    def forward(self, x, lengths, initial=False):
-        # orig = points[..., :3]
-        # end = points[..., 3:]
-        # length = (end - orig).norm(dim=-1, keepdim=True)
-    
-        # x, bbox_mask, t1, t2 = self.encode_points(points)
-        x = self.encode_points(x)
-
-        cls_pred, dist_cls_pred, dist_val_pred, dist_pred = self.forward_features(x)
-
-        dist_per_segment = lengths.unsqueeze(1) / dist_val_pred.shape[1]
-        dist_segment_pred = dist_cls_pred.argmax(dim=1)
-
-        # print(dist_segment_pred.shape, dist_per_segment.shape)
-        dist = (
-            torch.gather(dist_val_pred, 1, dist_segment_pred[:, None]).squeeze(1)
-            + dist_segment_pred * dist_per_segment
-        )
-        # dist = dist_pred + t1
-
-        if initial:
-            cls_pred.fill_(100)
-            dist.fill_(0)
-
-        return cls_pred, dist
-
-    def forward_features(self, x):
-        x = x.reshape(x.shape[0], self.n_points, -1)
-
-        y = torch.cat(
-            [
-                x[:, 1:],
-                x[:, :-1],
-            ],
-            dim=-1,
-        )
-
-        y = self.up(y)
-        if self.attn or self.norm or not self.use_tcnn:
-            y = self.layers(y)
-        else:
-            n, s, d = y.shape
-            y = y.reshape(n * s, d)
-            y = self.layers(y).float()
-            y = y.reshape(n, s, d)
-
-        cls = self.cls(y)
-        dist_cls = self.dist_cls(y)
-        dist_val = self.dist_val(y).clamp(0, 1)
-        dist = self.dist(y)
-
-        return cls, dist_cls, dist_val, dist
-
-    # def get_loss(self, points, mask, dist):
-    def get_loss(self, x, lengths, hit_mask, dist_adj):
-        # points = torch.cat([orig, end], dim=1)
-        # length = (end - orig).norm(dim=-1, keepdim=True)
-        # x, bbox_mask, t1, t2 = self.encode_points(points)
-        x = self.encode_points(x)
-
-        # mask = mask & bbox_mask.unsqueeze(1)
-        mask = hit_mask.unsqueeze(1)
-
-        cls_pred, dist_cls_pred, dist_val_pred, dist_pred = self.forward_features(x)
-
-        dist_adj = dist_adj.unsqueeze(1)
-        dist_adj[~mask] = 0
-
-        dist_per_segment = lengths.unsqueeze(1) / dist_val_pred.shape[1]
-        dist_segment = (dist_adj / dist_per_segment).long()
-        dist_segment_pred = dist_cls_pred.argmax(dim=1)
-
-        # print(dist_val_pred.shape, dist_segment.shape, dist_segment_pred.shape, dist_adj.shape)
-        # print(dist_segment)
-        dist_segment[dist_segment >= self.n_points - 1] = self.n_points - 2
-        # print(dist_segment_pred.max(), dist_segment.max(), dist_segment.min(), dist_segment_pred.min())
-        dist_segment[dist_segment < 0] = 0
-        
-
-        # exit()
-
-        a = (
-            torch.gather(dist_val_pred, 1, dist_segment[:, None]).squeeze(1) * dist_per_segment
-            + dist_segment * dist_per_segment
-        )
-        b = (
-            torch.gather(dist_val_pred, 1, dist_segment_pred[:, None]).squeeze(1) * dist_per_segment
-            + dist_segment_pred * dist_per_segment
-        )
-        # a = dist_pred
-        # b = dist_pred
-
-
-        cls_loss = F.binary_cross_entropy_with_logits(cls_pred, mask.float())
-        dist_cls_loss = F.cross_entropy(
-            dist_cls_pred[mask.squeeze(1)], dist_segment[mask.squeeze(1)]
-        )
-        dist_val_loss = F.mse_loss(a[mask], dist_adj[mask])
-
-        acc1 = ((cls_pred > 0) == mask).float().mean().item()
-        acc2 = (dist_segment_pred[mask] == dist_segment[mask]).float().mean().item()
-        mse = F.mse_loss(b[mask], dist_adj[mask])
-        loss = cls_loss
-
-        # if acc1 > 0.80:
-            # loss = loss + dist_val_loss / 100
-        loss = loss + dist_cls_loss + dist_val_loss #/ 100
-
-        return loss, acc1, mse    
+BBOX_FEATURE_DIM = 1024
 
 
 class MLPNet(nn.Module):
@@ -231,11 +46,66 @@ class MLPNet(nn.Module):
 
     def forward(self, x, bbox_feature, lengths, initial=False):
         if self.encoder:
-            x = self.encoder(x)
+            y = self.encoder(x)
+            y = y.reshape(y.shape[0], -1)
 
+        # x = x.reshape(x.shape[0], -1)
+
+        # x = torch.cat([x, bbox_feature], dim=1)
+
+        #################################################################
+
+        # x contains numbers in [0..1], shape (N, 3)
+        # bbox_feature is (N, BBOX_FEATURE_DIM) meaning 8 features of BBOX_FEATURE_DIM // 8 dim
+        # these are features in bbox corners
+        # use triliear interpolation to get features in points
+        # x is (N, 3)
+
+        # print(x.shape)
+
+        x = x.reshape(x.shape[0], -1, 3)
+
+        xd, yd, zd = x[..., 0], x[..., 1], x[..., 2]
+    
+        # Interpolation weights for 8 corners
+        w000 = (1 - xd) * (1 - yd) * (1 - zd)
+        w100 = xd * (1 - yd) * (1 - zd)
+        w010 = (1 - xd) * yd * (1 - zd)
+        w001 = (1 - xd) * (1 - yd) * zd
+        w101 = xd * (1 - yd) * zd
+        w011 = (1 - xd) * yd * zd
+        w110 = xd * yd * (1 - zd)
+        w111 = xd * yd * zd
+
+        # bbox_feature = bbox_feature.reshape(bbox_feature.shape[0], 8, -1)
+
+        f000, f100, f010, f001, f101, f011, f110, f111 = bbox_feature.chunk(8, dim=1)
+
+        # print(bbox_feature.shape)
+        # print(f000.shape, f100.shape)
+        # print(w000.shape, w100.shape)
+
+        interpolated_feature = (
+            w000[:, :, None] * f000[:, None, :] +
+            w100[:, :, None] * f100[:, None, :] +
+            w010[:, :, None] * f010[:, None, :] +
+            w001[:, :, None] * f001[:, None, :] +
+            w101[:, :, None] * f101[:, None, :] +
+            w011[:, :, None] * f011[:, None, :] +
+            w110[:, :, None] * f110[:, None, :] +
+            w111[:, :, None] * f111[:, None, :]
+        )
+
+        # print(x.shape)
+        # print(interpolated_feature.shape)
+
+        # x = torch.cat([x, interpolated_feature], dim=1)
+        x = interpolated_feature
         x = x.reshape(x.shape[0], -1)
 
-        x = torch.cat([x, bbox_feature], dim=1)
+        # x = torch.cat([x, y], dim=1)
+
+        #################################################################
 
         y = self.layers(x)
 
@@ -274,6 +144,11 @@ class NBVHModel(nn.Module):
         self.segment_length = (self.sphere_radius * 2) / self.n_segments
 
         self.bvh_data = bvh_data
+        nodes_min, nodes_max = bvh_data.nodes_data()
+        self.nodes_min = torch.tensor(nodes_min, device='cuda')
+        self.nodes_max = torch.tensor(nodes_max, device='cuda')
+        self.nodes_ext = self.nodes_max - self.nodes_min
+        self.nodes_center = (self.nodes_min + self.nodes_max) * 0.5
         self.bvh = bvh
 
         self.encoder = encoder
@@ -290,16 +165,34 @@ class NBVHModel(nn.Module):
         bbox_idxs = bbox_idxs.long()
         n_rays = orig.shape[0]
 
+        # print(bbox_idxs.min(), bbox_idxs.max())
+
+        nodes_min = self.nodes_min[bbox_idxs]
+        nodes_max = self.nodes_max[bbox_idxs]
+        orig = (orig - nodes_min) / (nodes_max - nodes_min)
+        end = (end - nodes_min) / (nodes_max - nodes_min)
+
+        orig = orig.clamp(0, 1)
+        end = end.clamp(0, 1)        
+
         ts = torch.linspace(0, 1, self.n_points, device="cuda")
         inp = orig[..., None, :] + (end - orig)[..., None, :] * ts[None, :, None]
-        min_infl = self.mesh_min - 0.5 * (self.mesh_max - self.mesh_min)
-        max_infl = self.mesh_max + 0.5 * (self.mesh_max - self.mesh_min)
-        inp = (inp - min_infl) / (max_infl - min_infl)
+        # min_infl = self.mesh_min - 0.5 * (self.mesh_max - self.mesh_min)
+        # max_infl = self.mesh_max + 0.5 * (self.mesh_max - self.mesh_min)
+        # inp = (inp - min_infl) / (max_infl - min_infl)
+
+        # nodes_min = self.nodes_min[bbox_idxs]
+        # nodes_max = self.nodes_max[bbox_idxs]
+        # inp = (inp - nodes_min[:, None, None]) / (nodes_max - nodes_min)[:, None, None]
+        
+
         lengths = (end - orig).norm(dim=-1)
 
         bbox_feature = self.bbox_features(bbox_idxs)
 
         pred_cls, pred_dist = self.net(inp, bbox_feature, lengths, initial=False)
+
+        pred_dist = pred_dist * (nodes_max - nodes_min).norm(dim=-1)
         
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float()) * 10 #, weight=hit_mask.float() * 0.9 + 0.1)
         mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask]) if hit_mask.sum() > 0 else torch.tensor(0, device="cuda", dtype=torch.float32)
@@ -309,34 +202,6 @@ class NBVHModel(nn.Module):
         loss = cls_loss + mse_loss
 
         return loss, acc, mse_loss
-    
-    # def nets_forward(self, inp, lengths, initial, nn_idxs):
-    #     nn_idxs = nn_idxs.long()
-
-    #     hit = torch.zeros((inp.shape[0],), device="cuda")
-    #     dist = torch.zeros((inp.shape[0],), device="cuda")
-
-    #     # unique idxs in nn_idxs
-    #     unique_nn_idxs = torch.unique(nn_idxs).tolist()
-    #     for nn_i in unique_nn_idxs:
-    #         if nn_i not in self.met:
-    #             self.met.add(nn_i)
-    #             print(f"Copying {nn_i} from {nn_i // 2}")
-
-    #             self.nets[nn_i].load_state_dict(self.nets[nn_i // 2].state_dict())
-
-    #     for nn_i in range(self.n_nns):
-    #         net = self.nets[nn_i]
-    #         mask = (nn_idxs == nn_i)
-    #         if mask.sum() == 0:
-    #             continue
-            
-    #         # print(f"running {nn_i}, {inp[mask].shape}, {lengths[mask].shape}")
-    #         h, d = net.forward(inp[mask], lengths[mask], initial=initial)
-    #         hit = hit.masked_scatter(mask, h)
-    #         dist = dist.masked_scatter(mask, d)
-        
-    #     return hit, dist
 
     def forward(self, orig, vec, initial=False):
         n_rays = orig.shape[0]
@@ -351,11 +216,27 @@ class NBVHModel(nn.Module):
 
             inp_orig = orig + vec * cur_t1[:, None]
             inp_vec = vec * (cur_t2 - cur_t1)[:, None]
+            inp_end = inp_orig + inp_vec
+
+            # print(cur_bbox_idxs.min(), cur_bbox_idxs.max())
+
+            nodes_min = self.nodes_min[cur_bbox_idxs]
+            nodes_max = self.nodes_max[cur_bbox_idxs]
+            inp_orig = (inp_orig - nodes_min) / (nodes_max - nodes_min)
+            inp_end = (inp_end - nodes_min) / (nodes_max - nodes_min)
+
+            inp_orig = inp_orig.clamp(0, 1)
+            inp_end = inp_end.clamp(0, 1)
+
             ts = torch.linspace(0, 1, self.n_points, device="cuda")
-            inp = inp_orig[..., None, :] + inp_vec[..., None, :] * ts[None, :, None]
-            min_infl = self.mesh_min - 0.5 * (self.mesh_max - self.mesh_min)
-            max_infl = self.mesh_max + 0.5 * (self.mesh_max - self.mesh_min)
-            inp = (inp - min_infl) / (max_infl - min_infl)
+            inp = inp_orig[..., None, :] + (inp_end - inp_orig)[..., None, :] * ts[None, :, None]
+            # min_infl = self.mesh_min - 0.5 * (self.mesh_max - self.mesh_min)
+            # max_infl = self.mesh_max + 0.5 * (self.mesh_max - self.mesh_min)
+            # inp = (inp - min_infl) / (max_infl - min_infl)
+            # nodes_min = self.nodes_min[cur_bbox_idxs]
+            # nodes_max = self.nodes_max[cur_bbox_idxs]
+            # print(inp.shape, nodes_min.shape, nodes_max.shape)
+            # inp = (inp - nodes_min[:, None, None]) / (nodes_max - nodes_min)[:, None, None]
 
             inp_c = inp[cur_mask]
             bbox_idxs_c = cur_bbox_idxs[cur_mask]
@@ -364,6 +245,8 @@ class NBVHModel(nn.Module):
             hit_c, dist_val_c = self.net(inp_c, bbox_feature, lengths, initial=initial)
             hit = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, hit_c)
             dist_val = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, dist_val_c)
+
+            # dist_val = dist_val * (nodes_max - nodes_min).norm(dim=-1)
 
             dist_val = dist_val + cur_t1
 
