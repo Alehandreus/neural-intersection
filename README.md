@@ -1,3 +1,5 @@
+**Roll back a couple of weeks to get working version.**
+
 Train neural network to predict ray intersections. This repository explores two types of tasks:
 1. Reconstruct model from multiview images with depth channel;
 2. Learn model representations from randomly sampled rays (requires 3D model and ray tracing)
