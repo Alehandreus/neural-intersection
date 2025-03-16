@@ -143,10 +143,6 @@ class Trainer:
         img_mask_pred = img_mask_pred.reshape(1, self.img_size, self.img_size, 1)
         img_dist_pred = img_dist_pred.reshape(1, self.img_size, self.img_size, 1) * (img_mask_pred > 0)
 
-        # img_dist = cut_edges(img_dist)
-        # img_dist_pred = cut_edges(img_dist_pred)
-        # mse_edge = F.mse_loss(img_dist, img_dist_pred).item()        
-
         mse = ((img_dist - img_dist_pred) ** 2).mean()
         print(f"Cam mse: {mse:.3f}")
 
@@ -159,4 +155,21 @@ class Trainer:
         ax[1].imshow(img_dist_pred[0].cpu().numpy() ** 2, cmap="gray")
         plt.tight_layout()
         plt.savefig("fig.png")
-        plt.clf()
+        plt.close()
+
+        ##############################
+
+        img_dist = cut_edges(img_dist)
+        img_dist_pred = cut_edges(img_dist_pred)
+        mse_edge = F.mse_loss(img_dist, img_dist_pred).item()
+
+        self.writer.add_scalar("MSE/cam_edge", mse_edge, self.n_steps)
+
+        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+        ax[0].axis("off")
+        ax[0].imshow(img_dist[0].cpu().numpy() ** 2, cmap="gray")
+        ax[1].axis("off")
+        ax[1].imshow(img_dist_pred[0].cpu().numpy() ** 2, cmap="gray")
+        plt.tight_layout()
+        plt.savefig("fig_edge.png")
+        plt.close()
