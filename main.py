@@ -49,7 +49,6 @@ def main(cfg):
 
     name = "exp5"
     trainer.set_model(model, name)
-    bvh.assign_nns(0, 0, n_nns_log)
     bvh.grow_nbvh(11)
     trainer.cam(initial=True)
     # exit()

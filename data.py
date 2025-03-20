@@ -128,7 +128,7 @@ class RayTraceDataset(Dataset):
 
         builder = CPUBuilder(mesh)
         self.bvh_data = builder.build_bvh(cfg.mesh.bvh_depth)
-        self.bvh = GPUTraverser(self.bvh_data)
+        self.bvh = GPUTraverser(self.bvh_data)       
 
         if mode == "train":
             print(f"Mesh center: [{self.mesh_center[0]:.2f}, {self.mesh_center[1]:.2f}, {self.mesh_center[2]:.2f}]")
@@ -136,10 +136,14 @@ class RayTraceDataset(Dataset):
             self.bvh_data.save_as_obj("bvh.obj")
 
         if mode == "train":
+            print("Under construction")
+            exit(1)
             self.total_size = cfg[mode].total_size
             pass # we will generate data on the fly
 
         elif mode == "val":
+            print("Under construction")
+            exit(1)
             self.total_size = cfg[mode].total_size
 
             print("Generating rays for validation set...", end=" ", flush=True)
@@ -155,6 +159,12 @@ class RayTraceDataset(Dataset):
         elif mode == "cam":
             self.img_size = cfg.cam.img_size
             self.total_size = self.img_size * self.img_size
+
+            self.ray_origins = torch.zeros((self.total_size, 3), device="cuda")
+            self.ray_ends = torch.zeros((self.total_size, 3), device="cuda")
+            self.bbox_idxs = torch.zeros((self.total_size), device="cuda")
+            self.mask = torch.zeros((self.total_size), device="cuda")
+            self.t = torch.zeros((self.total_size), device="cuda") 
             
             data = generate_camera_rays(self.bvh, self.mesh_center, mesh_extent, self.img_size)
             self.ray_origins = data['ray_origins']
@@ -229,54 +239,34 @@ class NBVHDataset(Dataset):
         assert mode in ['train', 'val', 'cam']
         self.mode = mode
         self.cfg = cfg
-
-        mesh = Mesh(cfg.mesh.path)
-        mesh.split_faces(cfg.mesh.split_faces)
-        mesh_min, mesh_max = mesh.bounds()
-        mesh_min = torch.tensor(mesh_min, device='cuda')
-        mesh_max = torch.tensor(mesh_max, device='cuda')
-        mesh_extent = torch.max(mesh_max - mesh_min)
-        self.mesh_center = (mesh_min + mesh_max) * 0.5
-        self.sphere_radius = torch.norm(mesh_max - mesh_min) * 0.5
-
         self.bvh = bvh
 
+        self.batch_size = cfg[mode].batch_size
+        self.total_size = cfg[mode].total_size
+
         if mode == "train":
-            self.batch_size = cfg[mode].batch_size
-            self.total_size = cfg[mode].total_size
+            self.ray_origins = torch.zeros((self.batch_size, 3), device="cuda", dtype=torch.float32)
+            self.ray_ends = torch.zeros((self.batch_size, 3), device="cuda", dtype=torch.float32)
+            self.bbox_idxs = torch.zeros((self.batch_size), device="cuda", dtype=torch.uint32)
+            self.mask = torch.zeros((self.batch_size), device="cuda", dtype=torch.bool)
+            self.t = torch.zeros((self.batch_size), device="cuda", dtype=torch.float32)            
             pass # we will generate data on the fly
 
         elif mode == "val":
-            self.batch_size = cfg[mode].batch_size
-            self.total_size = cfg[mode].total_size
-
+            self.ray_origins = torch.zeros((self.total_size, 3), device="cuda", dtype=torch.float32)
+            self.ray_ends = torch.zeros((self.total_size, 3), device="cuda", dtype=torch.float32)
+            self.bbox_idxs = torch.zeros((self.total_size), device="cuda", dtype=torch.uint32)
+            self.mask = torch.zeros((self.total_size), device="cuda", dtype=torch.bool)
+            self.t = torch.zeros((self.total_size), device="cuda", dtype=torch.float32)
+            
             print("Generating rays for validation set...", end=" ", flush=True)
-            data = self.generate_rays(self.total_size)
+            self.bvh.bbox_raygen(self.total_size, self.ray_origins, self.ray_ends, self.mask, self.t, self.bbox_idxs)
             torch.cuda.synchronize()
             print("Done!")
 
-            self.ray_origins = data['ray_origins']
-            self.ray_ends = data['ray_ends']
-            self.bbox_idxs = data['bbox_idxs']
-            self.nn_idxs = data['nn_idxs']
-            self.mask = data['mask']
-            self.t = data['t']
-
         elif mode == "cam":
             print("Use RayTrace dataset for camera rays")
-            exit()
-
-    def generate_rays(self, n):
-        ray_origins, ray_ends, bbox_idxs, nn_idxs, mask, t = self.bvh.bbox_raygen(n)
-
-        return {
-            'ray_origins': ray_origins,
-            'ray_ends': ray_ends,
-            'bbox_idxs': bbox_idxs.long(),
-            'nn_idxs': nn_idxs.long(),
-            'mask': mask,
-            't': t
-        }  
+            exit()  
     
     def __len__(self):
         return self.total_size
@@ -286,7 +276,6 @@ class NBVHDataset(Dataset):
             'ray_origins': self.ray_origins[index],
             'ray_vectors': self.ray_ends[index],
             'bbox_idxs': self.bbox_idxs[index],
-            'nn_idxs': self.nn_idxs[index],
             'mask': self.mask[index],
             't': self.t[index]
         }
@@ -303,22 +292,19 @@ class NBVHDataset(Dataset):
                 'ray_origins': self.ray_origins[s:e],
                 'ray_vectors': self.ray_ends[s:e],
                 'bbox_idxs': self.bbox_idxs[s:e],
-                'nn_idxs': self.nn_idxs[s:e],
                 'mask': self.mask[s:e],
                 't': self.t[s:e]
             }
-
-        ray_origins, ray_ends, bbox_idxs, nn_idxs, mask, t = self.bvh.bbox_raygen(self.batch_size)
+        
+        self.bvh.bbox_raygen(self.batch_size, self.ray_origins, self.ray_ends, self.mask, self.t, self.bbox_idxs)
 
         return {
-            'ray_origins': ray_origins,
-            'ray_vectors': ray_ends,
-            'bbox_idxs': bbox_idxs,
-            'nn_idxs': nn_idxs,
-            'mask': mask,
-            't': t
+            'ray_origins': self.ray_origins,
+            'ray_vectors': self.ray_ends,
+            'bbox_idxs': self.bbox_idxs,
+            'mask': self.mask,
+            't': self.t
         }
 
-    
     def shuffle(self):
         pass

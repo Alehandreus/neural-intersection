@@ -2,6 +2,9 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from bvh import Mesh, CPUBuilder, GPUTraverser
+from bvh import TreeType, TraverseMode
+
 from myutils.math import *
 
 EPS = 1e-8
@@ -34,13 +37,17 @@ def generate_camera_rays(bvh, mesh_center, mesh_extent, img_size):
     ray_vectors = cam_dir[None, :] + x_dir[None, :] * x_coords[:, None] + y_dir[None, :] * y_coords[:, None]
     ray_vectors = ray_vectors / torch.norm(ray_vectors, dim=1, keepdim=True)
 
-    mask, t = bvh.closest_primitive(ray_origins, ray_vectors)
+    mask = torch.ones(img_size * img_size, device='cuda', dtype=torch.bool)
+    t1 = torch.ones(img_size * img_size, device='cuda', dtype=torch.float32)
+    t2 = torch.ones(img_size * img_size, device='cuda', dtype=torch.float32)
+    node_idxs = torch.zeros(img_size * img_size, device='cuda', dtype=torch.uint32)
+    bvh.traverse(ray_origins, ray_vectors, mask, t1, t2, node_idxs, TreeType.BVH, TraverseMode.CLOSEST_PRIMITIVE)
 
     return {
         'ray_origins': ray_origins,
         'ray_vectors': ray_vectors,
         'mask': mask,
-        't': t
+        't': t1,
     }
 
 

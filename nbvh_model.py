@@ -4,7 +4,9 @@ from torch import nn
 from torch.nn import functional as F
 from tqdm import tqdm
 import tinycudann as tcnn
+
 from bvh import Mesh, CPUBuilder, GPUTraverser
+from bvh import TreeType, TraverseMode
 
 from myutils.modules import TransformerBlock, AttentionPooling, MeanPooling, HashGridLoRAEncoder, HashGridEncoder
 from myutils.misc import *
@@ -161,11 +163,9 @@ class NBVHModel(nn.Module):
 
         self.cuda()
 
-    def get_loss(self, orig, end, bbox_idxs, nn_idxs, hit_mask, dist):
+    def get_loss(self, orig, end, bbox_idxs, hit_mask, dist):
         bbox_idxs = bbox_idxs.long()
         n_rays = orig.shape[0]
-
-        # print(bbox_idxs.min(), bbox_idxs.max())
 
         nodes_min = self.nodes_min[bbox_idxs]
         nodes_max = self.nodes_max[bbox_idxs]
@@ -177,15 +177,7 @@ class NBVHModel(nn.Module):
 
         ts = torch.linspace(0, 1, self.n_points, device="cuda")
         inp = orig[..., None, :] + (end - orig)[..., None, :] * ts[None, :, None]
-        # min_infl = self.mesh_min - 0.5 * (self.mesh_max - self.mesh_min)
-        # max_infl = self.mesh_max + 0.5 * (self.mesh_max - self.mesh_min)
-        # inp = (inp - min_infl) / (max_infl - min_infl)
-
-        # nodes_min = self.nodes_min[bbox_idxs]
-        # nodes_max = self.nodes_max[bbox_idxs]
-        # inp = (inp - nodes_min[:, None, None]) / (nodes_max - nodes_min)[:, None, None]
         
-
         lengths = (end - orig).norm(dim=-1)
 
         bbox_feature = self.bbox_features(bbox_idxs)
@@ -209,51 +201,44 @@ class NBVHModel(nn.Module):
         dist = torch.ones((n_rays,), dtype=torch.float32).cuda() * 1e9
 
         self.bvh.reset_stack(n_rays)
-        alive, cur_mask, cur_bbox_idxs, nn_idxs, cur_t1, cur_t2 = self.bvh.another_bbox_nbvh(orig, vec)
+
+        cur_mask = torch.ones((n_rays,), dtype=torch.bool).cuda()
+        cur_bbox_idxs = torch.zeros((n_rays,), dtype=torch.uint32).cuda()
+        cur_t1 = torch.zeros((n_rays,), dtype=torch.float32).cuda()
+        cur_t2 = torch.zeros((n_rays,), dtype=torch.float32).cuda()
+
+        alive = self.bvh.traverse(orig, vec, cur_mask, cur_t1, cur_t2, cur_bbox_idxs, TreeType.NBVH, TraverseMode.ANOTHER_BBOX)
         while alive:
-            cur_bbox_idxs = cur_bbox_idxs.long()
-            nn_idxs = nn_idxs.long()
+            cur_bbox_idxs_l = cur_bbox_idxs.long()
 
             inp_orig = orig + vec * cur_t1[:, None]
             inp_vec = vec * (cur_t2 - cur_t1)[:, None]
             inp_end = inp_orig + inp_vec
 
-            # print(cur_bbox_idxs.min(), cur_bbox_idxs.max())
-
-            nodes_min = self.nodes_min[cur_bbox_idxs]
-            nodes_max = self.nodes_max[cur_bbox_idxs]
+            cur_bbox_idxs_l[~cur_mask] = 0
+            nodes_min = self.nodes_min[cur_bbox_idxs_l]
+            nodes_max = self.nodes_max[cur_bbox_idxs_l]
             inp_orig = (inp_orig - nodes_min) / (nodes_max - nodes_min)
             inp_end = (inp_end - nodes_min) / (nodes_max - nodes_min)
-
             inp_orig = inp_orig.clamp(0, 1)
             inp_end = inp_end.clamp(0, 1)
 
             ts = torch.linspace(0, 1, self.n_points, device="cuda")
             inp = inp_orig[..., None, :] + (inp_end - inp_orig)[..., None, :] * ts[None, :, None]
-            # min_infl = self.mesh_min - 0.5 * (self.mesh_max - self.mesh_min)
-            # max_infl = self.mesh_max + 0.5 * (self.mesh_max - self.mesh_min)
-            # inp = (inp - min_infl) / (max_infl - min_infl)
-            # nodes_min = self.nodes_min[cur_bbox_idxs]
-            # nodes_max = self.nodes_max[cur_bbox_idxs]
-            # print(inp.shape, nodes_min.shape, nodes_max.shape)
-            # inp = (inp - nodes_min[:, None, None]) / (nodes_max - nodes_min)[:, None, None]
 
             inp_c = inp[cur_mask]
-            bbox_idxs_c = cur_bbox_idxs[cur_mask]
+            bbox_idxs_c = cur_bbox_idxs_l[cur_mask]
             lengths = inp_vec.norm(dim=-1)[cur_mask]
             bbox_feature = self.bbox_features(bbox_idxs_c)
             hit_c, dist_val_c = self.net(inp_c, bbox_feature, lengths, initial=initial)
+
             hit = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, hit_c)
-            dist_val = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, dist_val_c)
-
-            # dist_val = dist_val * (nodes_max - nodes_min).norm(dim=-1)
-
-            dist_val = dist_val + cur_t1
+            dist_val = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, dist_val_c) + cur_t1
 
             update_mask = (hit > 0) & (dist_val < dist) & cur_mask
             dist[update_mask] = dist_val[update_mask]
 
-            alive, cur_mask, cur_bbox_idxs, nn_idxs, cur_t1, cur_t2 = self.bvh.another_bbox_nbvh(orig, vec)
+            alive = self.bvh.traverse(orig, vec, cur_mask, cur_t1, cur_t2, cur_bbox_idxs, TreeType.NBVH, TraverseMode.ANOTHER_BBOX)
         
         dist[dist == 1e9] = 0
 
