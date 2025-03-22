@@ -12,7 +12,6 @@ from myutils.modules import HashGridEncoder
 from myutils.misc import *
 from myutils.ray import *
 
-from attn_model import TransformerModel
 from nbvh_model import NBVHModel
 
 from trainer import Trainer
@@ -31,25 +30,44 @@ def main(cfg):
     print("BVH nodes:", bvh_data.n_nodes)
     print("BVH leaves:", bvh_data.n_leaves)
 
+    # print("Mesh bounds:", mesh.bounds())
+    # nodes_min, nodes_max = bvh_data.nodes_data()
+    # print("BVH root:", nodes_min[0], nodes_max[0])
+    # exit()
+
+    # print(
+    #     (nodes_min == nodes_min[0]).sum(),
+    # )
+    # a = (nodes_min == nodes_max).argmax()
+    # print((nodes_min == nodes_max)[a])
+    # print(
+    #     nodes_min[a]
+    # )
+    # print(
+    #     nodes_max[a]
+    # )
+    # exit()
+
     bvh = GPUTraverser(bvh_data)
     bvh.init_rand_state(cfg.train.total_size)
+    bvh.grow_nbvh(11)
 
     trainer = Trainer(cfg, tqdm_leave=True, bvh=bvh)
 
-    n_nns_log = 0
-
-    n_points = 8
-
     # encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256)
-    encoder = None
-
-    # model = TransformerModel(cfg, encoder, 32, 6, n_points, use_tcnn=False, attn=True, norm=True, use_bvh=True)
-    # model = NBVHModel(cfg, encoder, 24, 3, n_points, bvh_data=bvh_data, bvh=bvh, norm=False, n_nns_log=n_nns_log)
-    model = NBVHModel(cfg, encoder, 256, 8, n_points, bvh_data=bvh_data, bvh=bvh, norm=False, n_nns_log=n_nns_log)
+    model = NBVHModel(
+        cfg=cfg,
+        n_layers=6,
+        inner_dim=256,
+        n_points=3,
+        enc_dim=2,
+        enc_depth=12,
+        bvh_data=bvh_data,
+        bvh=bvh,
+    )
 
     name = "exp5"
     trainer.set_model(model, name)
-    bvh.grow_nbvh(11)
     trainer.cam(initial=True)
     # exit()
     for i in range(100):
@@ -57,6 +75,8 @@ def main(cfg):
         trainer.train()
         trainer.val()
         trainer.cam()
+
+        # bvh.grow_nbvh(1)
 
         # if i % 2 == 1:
         # if i > 0 and i < 15:

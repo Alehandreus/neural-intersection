@@ -13,7 +13,8 @@ from myutils.misc import *
 from myutils.ray import *
 
 
-BBOX_FEATURE_DIM = 1024
+BBOX_FEATURE_DIM = 8 * 2
+DEPTH = 16
 
 
 class MLPNet(nn.Module):
@@ -43,71 +44,13 @@ class MLPNet(nn.Module):
 
         dummy_input = torch.randn((10, self.n_points, 3), device="cuda")
         dummy_lengths = torch.randn((10,), device="cuda") ** 2
-        bbox_feature = torch.randn((10, BBOX_FEATURE_DIM), device="cuda")
-        self.forward(dummy_input, bbox_feature, dummy_lengths)
+        bbox_feature = torch.randn((10, BBOX_FEATURE_DIM // 8 * DEPTH * 6), device="cuda")
+        self.forward(bbox_feature, dummy_lengths)
 
-    def forward(self, x, bbox_feature, lengths, initial=False):
+    def forward(self, x, lengths, initial=False):
         if self.encoder:
             y = self.encoder(x)
             y = y.reshape(y.shape[0], -1)
-
-        # x = x.reshape(x.shape[0], -1)
-
-        # x = torch.cat([x, bbox_feature], dim=1)
-
-        #################################################################
-
-        # x contains numbers in [0..1], shape (N, 3)
-        # bbox_feature is (N, BBOX_FEATURE_DIM) meaning 8 features of BBOX_FEATURE_DIM // 8 dim
-        # these are features in bbox corners
-        # use triliear interpolation to get features in points
-        # x is (N, 3)
-
-        # print(x.shape)
-
-        x = x.reshape(x.shape[0], -1, 3)
-
-        xd, yd, zd = x[..., 0], x[..., 1], x[..., 2]
-    
-        # Interpolation weights for 8 corners
-        w000 = (1 - xd) * (1 - yd) * (1 - zd)
-        w100 = xd * (1 - yd) * (1 - zd)
-        w010 = (1 - xd) * yd * (1 - zd)
-        w001 = (1 - xd) * (1 - yd) * zd
-        w101 = xd * (1 - yd) * zd
-        w011 = (1 - xd) * yd * zd
-        w110 = xd * yd * (1 - zd)
-        w111 = xd * yd * zd
-
-        # bbox_feature = bbox_feature.reshape(bbox_feature.shape[0], 8, -1)
-
-        f000, f100, f010, f001, f101, f011, f110, f111 = bbox_feature.chunk(8, dim=1)
-
-        # print(bbox_feature.shape)
-        # print(f000.shape, f100.shape)
-        # print(w000.shape, w100.shape)
-
-        interpolated_feature = (
-            w000[:, :, None] * f000[:, None, :] +
-            w100[:, :, None] * f100[:, None, :] +
-            w010[:, :, None] * f010[:, None, :] +
-            w001[:, :, None] * f001[:, None, :] +
-            w101[:, :, None] * f101[:, None, :] +
-            w011[:, :, None] * f011[:, None, :] +
-            w110[:, :, None] * f110[:, None, :] +
-            w111[:, :, None] * f111[:, None, :]
-        )
-
-        # print(x.shape)
-        # print(interpolated_feature.shape)
-
-        # x = torch.cat([x, interpolated_feature], dim=1)
-        x = interpolated_feature
-        x = x.reshape(x.shape[0], -1)
-
-        # x = torch.cat([x, y], dim=1)
-
-        #################################################################
 
         y = self.layers(x)
 
@@ -122,20 +65,64 @@ class MLPNet(nn.Module):
             dist.fill_(0)
 
         return cls, dist
+    
 
+def interpolate_bbox_features(x, bbox_feature):
+    x = x.reshape(x.shape[0], -1, 3)
+
+    xd, yd, zd = x[..., 0], x[..., 1], x[..., 2]
+
+    w000 = (1 - xd) * (1 - yd) * (1 - zd)
+    w100 = xd * (1 - yd) * (1 - zd)
+    w010 = (1 - xd) * yd * (1 - zd)
+    w001 = (1 - xd) * (1 - yd) * zd
+    w101 = xd * (1 - yd) * zd
+    w011 = (1 - xd) * yd * zd
+    w110 = xd * yd * (1 - zd)
+    w111 = xd * yd * zd
+
+    f000, f100, f010, f001, f101, f011, f110, f111 = bbox_feature.chunk(8, dim=1)
+
+    interpolated_feature = (
+        w000[:, :, None] * f000[:, None, :] +
+        w100[:, :, None] * f100[:, None, :] +
+        w010[:, :, None] * f010[:, None, :] +
+        w001[:, :, None] * f001[:, None, :] +
+        w101[:, :, None] * f101[:, None, :] +
+        w011[:, :, None] * f011[:, None, :] +
+        w110[:, :, None] * f110[:, None, :] +
+        w111[:, :, None] * f111[:, None, :]
+    )
+
+    x = interpolated_feature
+    x = x.reshape(x.shape[0], -1)
+
+    return x
 
 class NBVHModel(nn.Module):
-    def __init__(self, cfg, encoder, dim, n_layers, n_points, bvh_data, bvh, norm=True, n_nns_log=0):
+    def __init__(self, cfg, n_layers, inner_dim, n_points, enc_dim, enc_depth, bvh_data, bvh):
         super().__init__()
 
         self.cfg = cfg
-        self.n_points = n_points
-        self.n_segments = n_points - 1
-        self.dim = dim
-        self.n_layers = n_layers
 
-        self.n_nns = 2 ** n_nns_log
-        self.n_nns_log = n_nns_log
+
+        # ==== MLP ==== #
+
+        self.in_dim = n_points * enc_depth * enc_dim
+        self.inner_dim = inner_dim
+        self.out_dim = 2
+        self.n_points = n_points
+        self.n_layers = n_layers
+        self.mlp = tcnn.Network(self.in_dim, self.out_dim, {
+            "otype": "CutlassMLP",
+            "activation": "ReLU",
+            "output_activation": "None",
+            "n_neurons": self.inner_dim,
+            "n_hidden_layers": self.n_layers,
+        })
+        
+
+        # ==== BVH ==== #
 
         mesh = Mesh(cfg.mesh.path)
         mesh_min, mesh_max = mesh.bounds()
@@ -143,7 +130,6 @@ class NBVHModel(nn.Module):
         self.mesh_max = torch.tensor(mesh_max, device='cuda')
         self.sphere_center = (self.mesh_min + self.mesh_max) * 0.5
         self.sphere_radius = torch.norm(self.mesh_max - self.mesh_min) * 0.5
-        self.segment_length = (self.sphere_radius * 2) / self.n_segments
 
         self.bvh_data = bvh_data
         nodes_min, nodes_max = bvh_data.nodes_data()
@@ -153,43 +139,76 @@ class NBVHModel(nn.Module):
         self.nodes_center = (self.nodes_min + self.nodes_max) * 0.5
         self.bvh = bvh
 
-        self.encoder = encoder
 
-        bbox_feature_dim = BBOX_FEATURE_DIM
-        self.bbox_features = nn.Embedding(self.bvh_data.n_nodes, bbox_feature_dim)
-        self.bbox_features.requires_grad_(False)
+        # ==== Encoder ==== #
+
+        self.enc_dim = enc_dim
+        self.enc_depth = enc_depth
+        self.bbox_emb = nn.Embedding(self.bvh_data.n_nodes, self.enc_dim * 8, device='cuda')
+
+
+        # ==== misc ==== #
         
-        self.net = MLPNet(n_points, encoder, dim, n_layers, norm=norm)
+        # self.batch_size = cfg.train.batch_size
+        # self.train_depth = torch.zeros((self.batch_size,), dtype=torch.int).cuda()
+        # self.train_history = torch.zeros((self.batch_size, 64), dtype=torch.uint32).cuda()
+        # self.train_bbox_idxs = torch.zeros((self.batch_size,), dtype=torch.uint32).cuda()
 
-        self.cuda()
+        self.nodes_extent = self.nodes_max - self.nodes_min
+        self.nodes_extent[self.nodes_extent == 0] = 0.5
 
-    def get_loss(self, orig, end, bbox_idxs, hit_mask, dist):
-        bbox_idxs = bbox_idxs.long()
+        self.ts = torch.linspace(0, 1, self.n_points, device="cuda")
+
+    def net_forward(self, orig, end, bbox_idxs, initial=False):
         n_rays = orig.shape[0]
 
-        nodes_min = self.nodes_min[bbox_idxs]
-        nodes_max = self.nodes_max[bbox_idxs]
-        orig = (orig - nodes_min) / (nodes_max - nodes_min)
-        end = (end - nodes_min) / (nodes_max - nodes_min)
+        depth = torch.zeros((n_rays,), dtype=torch.int).cuda()
+        history = torch.zeros((n_rays, 64), dtype=torch.uint32).cuda()
+        masks = torch.ones((n_rays,), dtype=torch.bool, device="cuda")
+        self.bvh.fill_history(masks, bbox_idxs, depth, history)
+        depth_l = depth.long()
+        history_l = history.long()
 
-        orig = orig.clamp(0, 1)
-        end = end.clamp(0, 1)        
-
-        ts = torch.linspace(0, 1, self.n_points, device="cuda")
-        inp = orig[..., None, :] + (end - orig)[..., None, :] * ts[None, :, None]
-        
+        bbox_features = [torch.zeros((n_rays, self.enc_dim), device="cuda") for _ in range(self.enc_depth)]
         lengths = (end - orig).norm(dim=-1)
+        max_depth = depth_l.max()
+        # if max_depth > self.enc_depth:
+        #     print("Warning: max_depth > enc_depth:", max_depth, self.enc_depth)
+        max_depth = min(max_depth, self.enc_depth)
+        
+        for i in range(max_depth):
+            path_bbox_idxs = history_l[:, i]
+            path_nodes_min = self.nodes_min[path_bbox_idxs]
+            extent = self.nodes_extent[path_bbox_idxs]
+            path_orig = (orig - path_nodes_min) / extent
+            path_end = (end - path_nodes_min) / extent
+            path_orig = path_orig.clamp(0, 1)
+            path_end = path_end.clamp(0, 1)
+            path_inp = path_orig[..., None, :] + (path_end - path_orig)[..., None, :] * self.ts[None, :, None]
 
-        bbox_feature = self.bbox_features(bbox_idxs)
+            path_bbox_feature = self.bbox_emb(path_bbox_idxs)
+            path_bbox_feature = interpolate_bbox_features(path_inp, path_bbox_feature)
 
-        pred_cls, pred_dist = self.net(inp, bbox_feature, lengths, initial=False)
+            bbox_features[i] = path_bbox_feature
 
-        pred_dist = pred_dist * (nodes_max - nodes_min).norm(dim=-1)
+        bbox_features = torch.cat(bbox_features, dim=1)
+        a = self.mlp(bbox_features).float()
+        pred_cls, pred_dist = a[:, 0], a[:, 1]
+        pred_dist = pred_dist * lengths
+
+        if initial:
+            pred_cls.fill_(100)
+            pred_dist.fill_(0)
+
+        return pred_cls, pred_dist
+
+    def get_loss(self, orig, end, bbox_idxs, hit_mask, dist):
+        pred_cls, pred_dist = self.net_forward(orig, end, bbox_idxs, initial=False)
         
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float()) * 10 #, weight=hit_mask.float() * 0.9 + 0.1)
         mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask]) if hit_mask.sum() > 0 else torch.tensor(0, device="cuda", dtype=torch.float32)
 
-        acc = ((pred_cls > 0) == hit_mask).sum().item() / n_rays if n_rays > 0 else 0
+        acc = ((pred_cls > 0) == hit_mask).float().mean().item()
 
         loss = cls_loss + mse_loss
 
@@ -209,34 +228,17 @@ class NBVHModel(nn.Module):
 
         alive = self.bvh.traverse(orig, vec, cur_mask, cur_t1, cur_t2, cur_bbox_idxs, TreeType.NBVH, TraverseMode.ANOTHER_BBOX)
         while alive:
-            cur_bbox_idxs_l = cur_bbox_idxs.long()
-
             inp_orig = orig + vec * cur_t1[:, None]
             inp_vec = vec * (cur_t2 - cur_t1)[:, None]
             inp_end = inp_orig + inp_vec
 
-            cur_bbox_idxs_l[~cur_mask] = 0
-            nodes_min = self.nodes_min[cur_bbox_idxs_l]
-            nodes_max = self.nodes_max[cur_bbox_idxs_l]
-            inp_orig = (inp_orig - nodes_min) / (nodes_max - nodes_min)
-            inp_end = (inp_end - nodes_min) / (nodes_max - nodes_min)
-            inp_orig = inp_orig.clamp(0, 1)
-            inp_end = inp_end.clamp(0, 1)
+            pred_cls_c, pred_dist_c = self.net_forward(inp_orig[cur_mask], inp_end[cur_mask], cur_bbox_idxs.long()[cur_mask].to(torch.uint32), initial=initial)
 
-            ts = torch.linspace(0, 1, self.n_points, device="cuda")
-            inp = inp_orig[..., None, :] + (inp_end - inp_orig)[..., None, :] * ts[None, :, None]
+            pred_cls = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, pred_cls_c)
+            pred_dist = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, pred_dist_c) + cur_t1
 
-            inp_c = inp[cur_mask]
-            bbox_idxs_c = cur_bbox_idxs_l[cur_mask]
-            lengths = inp_vec.norm(dim=-1)[cur_mask]
-            bbox_feature = self.bbox_features(bbox_idxs_c)
-            hit_c, dist_val_c = self.net(inp_c, bbox_feature, lengths, initial=initial)
-
-            hit = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, hit_c)
-            dist_val = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, dist_val_c) + cur_t1
-
-            update_mask = (hit > 0) & (dist_val < dist) & cur_mask
-            dist[update_mask] = dist_val[update_mask]
+            update_mask = (pred_cls > 0) & (pred_dist < dist) & cur_mask
+            dist[update_mask] = pred_dist[update_mask]
 
             alive = self.bvh.traverse(orig, vec, cur_mask, cur_t1, cur_t2, cur_bbox_idxs, TreeType.NBVH, TraverseMode.ANOTHER_BBOX)
         
