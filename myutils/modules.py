@@ -9,40 +9,40 @@ from myutils import hashgrid
 
 
 
-class HashGridEncoder(nn.Module):
-    def __init__(
-        self,
-        range,
-        dim=3,
-        n_levels=16,
-        n_features_per_level=2,
-        log2_hashmap_size=15,
-        base_resolution=16,
-        finest_resolution=512,
-    ):
-        super().__init__()
-        self.input_dim = dim
-        b = (finest_resolution / base_resolution) ** (1 / (n_levels - 1))
-        config = {
-            "otype": "Grid",
-            "type": "Hash",
-            "n_levels": n_levels,
-            "n_features_per_level": n_features_per_level,
-            "log2_hashmap_size": log2_hashmap_size,
-            "base_resolution": base_resolution,
-            # 'finest_resolution': finest_resolution,
-            "per_level_scale": b,
-        }
-        self.enc = tcnn.Encoding(self.input_dim, config)
-        self.range = range
+# class HashGridEncoder(nn.Module):
+#     def __init__(
+#         self,
+#         range,
+#         dim=3,
+#         n_levels=16,
+#         n_features_per_level=2,
+#         log2_hashmap_size=15,
+#         base_resolution=16,
+#         finest_resolution=512,
+#     ):
+#         super().__init__()
+#         self.input_dim = dim
+#         b = (finest_resolution / base_resolution) ** (1 / (n_levels - 1))
+#         config = {
+#             "otype": "Grid",
+#             "type": "Hash",
+#             "n_levels": n_levels,
+#             "n_features_per_level": n_features_per_level,
+#             "log2_hashmap_size": log2_hashmap_size,
+#             "base_resolution": base_resolution,
+#             # 'finest_resolution': finest_resolution,
+#             "per_level_scale": b,
+#         }
+#         self.enc = tcnn.Encoding(self.input_dim, config)
+#         self.range = range
 
-    def forward(self, x, **kwargs):
-        x = (x + self.range) / (2 * self.range)
-        orig_shape = x.shape
-        x = x.reshape(-1, self.input_dim)
-        x = self.enc(x).float()
-        x = x.reshape(*orig_shape[:-1], -1)
-        return x 
+#     def forward(self, x, **kwargs):
+#         x = (x + self.range) / (2 * self.range)
+#         orig_shape = x.shape
+#         x = x.reshape(-1, self.input_dim)
+#         x = self.enc(x).float()
+#         x = x.reshape(*orig_shape[:-1], -1)
+#         return x 
 
 
 class TransformerBlock(nn.Module):

@@ -41,7 +41,8 @@ def generate_camera_rays(bvh, mesh_center, mesh_extent, img_size):
     t1 = torch.ones(img_size * img_size, device='cuda', dtype=torch.float32)
     t2 = torch.ones(img_size * img_size, device='cuda', dtype=torch.float32)
     node_idxs = torch.zeros(img_size * img_size, device='cuda', dtype=torch.uint32)
-    bvh.traverse(ray_origins, ray_vectors, mask, t1, t2, node_idxs, TreeType.BVH, TraverseMode.CLOSEST_PRIMITIVE)
+    normals = torch.zeros(img_size * img_size, 3, device='cuda', dtype=torch.float32)
+    bvh.traverse(ray_origins, ray_vectors, mask, t1, t2, node_idxs, normals, TreeType.BVH, TraverseMode.CLOSEST_PRIMITIVE)
 
     return {
         'ray_origins': ray_origins,

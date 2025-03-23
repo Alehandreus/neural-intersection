@@ -54,24 +54,30 @@ class Trainer:
 
         total_bytes = 0
 
-        if hasattr(self.model, "encoder"):
-            encoder_bytes = get_num_params(self.model.encoder)
-            total_bytes += encoder_bytes
-            print(f"Encoder bytes: {encoder_bytes} ({encoder_bytes / 1e6:.3f}MB)")
+        encoder_bytes = self.model.encoder.get_num_parameters()
+        print(f"Encoder bytes: {encoder_bytes} ({encoder_bytes / 1e6:.3f}MB)")
 
-        if hasattr(self.model, "net"):
-            net_bytes = get_num_params(self.model.net)
-            total_bytes += net_bytes
-            print(f"Net params: {net_bytes} ({net_bytes / 1e6:.3f}MB)")
+        net_bytes = get_num_params(self.model.mlp)
+        print(f"Net params: {net_bytes} ({net_bytes / 1e6:.3f}MB)")
 
-        if hasattr(self.model, "bvh_data"):
-            bvh_bytes = self.model.bvh_data.nodes_memory_bytes()
-            total_bytes += bvh_bytes
-            print(f"Bvh bytes: {bvh_bytes} ({bvh_bytes / 1e6:.3f}MB)")
+        # if hasattr(self.model, "encoder"):
+        #     encoder_bytes = get_num_params(self.model.encoder)
+        #     total_bytes += encoder_bytes
+        #     print(f"Encoder bytes: {encoder_bytes} ({encoder_bytes / 1e6:.3f}MB)")
 
-        print(f"Total bytes: {total_bytes} ({total_bytes / 1e6:.3f}MB)")
+        # if hasattr(self.model, "net"):
+        #     net_bytes = get_num_params(self.model.net)
+        #     total_bytes += net_bytes
+        #     print(f"Net params: {net_bytes} ({net_bytes / 1e6:.3f}MB)")
 
-        print(f"Total params: {get_num_params(self.model)}")
+        # if hasattr(self.model, "bvh_data"):
+        #     bvh_bytes = self.model.bvh_data.nodes_memory_bytes()
+        #     total_bytes += bvh_bytes
+        #     print(f"Bvh bytes: {bvh_bytes} ({bvh_bytes / 1e6:.3f}MB)")
+
+        # print(f"Total bytes: {total_bytes} ({total_bytes / 1e6:.3f}MB)")
+
+        # print(f"Total params: {get_num_params(self.model)}")
 
     def train(self):
         self.ds_train.shuffle()

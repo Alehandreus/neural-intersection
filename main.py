@@ -1,20 +1,13 @@
 import hydra
-import matplotlib.pyplot as plt
 import torch
-import numpy as np
-from torch import nn
-from torch.nn import functional as F
-from tqdm import tqdm
-import tinycudann as tcnn
-from bvh import Mesh, CPUBuilder, GPUTraverser
 
-from myutils.modules import HashGridEncoder
 from myutils.misc import *
 from myutils.ray import *
 
-from nbvh_model import NBVHModel
-
+from nbvh_model import NBVHModel, HashGridEncoder, BBoxEncoder
 from trainer import Trainer
+
+from bvh import Mesh, CPUBuilder, GPUTraverser
 
 
 @hydra.main(config_path="config", config_name="nbvh", version_base=None)
@@ -30,38 +23,21 @@ def main(cfg):
     print("BVH nodes:", bvh_data.n_nodes)
     print("BVH leaves:", bvh_data.n_leaves)
 
-    # print("Mesh bounds:", mesh.bounds())
-    # nodes_min, nodes_max = bvh_data.nodes_data()
-    # print("BVH root:", nodes_min[0], nodes_max[0])
-    # exit()
-
-    # print(
-    #     (nodes_min == nodes_min[0]).sum(),
-    # )
-    # a = (nodes_min == nodes_max).argmax()
-    # print((nodes_min == nodes_max)[a])
-    # print(
-    #     nodes_min[a]
-    # )
-    # print(
-    #     nodes_max[a]
-    # )
-    # exit()
-
     bvh = GPUTraverser(bvh_data)
     bvh.init_rand_state(cfg.train.total_size)
-    bvh.grow_nbvh(11)
+    bvh.grow_nbvh(13)
 
     trainer = Trainer(cfg, tqdm_leave=True, bvh=bvh)
 
-    # encoder = HashGridEncoder(range=1, dim=3, log2_hashmap_size=18, finest_resolution=256)
+    encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=16, finest_resolution=256, bvh_data=bvh_data, bvh=bvh)
+    # encoder = BBoxEncoder(cfg, enc_dim=4, enc_depth=14, bvh_data=bvh_data, bvh=bvh)
+
     model = NBVHModel(
         cfg=cfg,
         n_layers=6,
         inner_dim=256,
         n_points=3,
-        enc_dim=2,
-        enc_depth=12,
+        encoder=encoder,
         bvh_data=bvh_data,
         bvh=bvh,
     )
@@ -69,7 +45,6 @@ def main(cfg):
     name = "exp5"
     trainer.set_model(model, name)
     trainer.cam(initial=True)
-    # exit()
     for i in range(100):
         print("Epoch", i)
         trainer.train()
@@ -77,15 +52,6 @@ def main(cfg):
         trainer.cam()
 
         # bvh.grow_nbvh(1)
-
-        # if i % 2 == 1:
-        # if i > 0 and i < 15:
-        #     bvh.grow_nbvh(1)
-        # if i < 20:
-        #     bvh.grow_nbvh(1)
-
-        # if i > 0 and i < 4:
-        #     bvh.assign_nns(0, 0, i)
 
 
 if __name__ == "__main__":

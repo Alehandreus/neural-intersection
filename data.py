@@ -165,6 +165,7 @@ class RayTraceDataset(Dataset):
             self.bbox_idxs = torch.zeros((self.total_size), device="cuda")
             self.mask = torch.zeros((self.total_size), device="cuda")
             self.t = torch.zeros((self.total_size), device="cuda") 
+            self.normals = torch.zeros((self.total_size, 3), device="cuda")
             
             data = generate_camera_rays(self.bvh, self.mesh_center, mesh_extent, self.img_size)
             self.ray_origins = data['ray_origins']
@@ -249,7 +250,8 @@ class NBVHDataset(Dataset):
             self.ray_ends = torch.zeros((self.batch_size, 3), device="cuda", dtype=torch.float32)
             self.bbox_idxs = torch.zeros((self.batch_size), device="cuda", dtype=torch.uint32)
             self.mask = torch.zeros((self.batch_size), device="cuda", dtype=torch.bool)
-            self.t = torch.zeros((self.batch_size), device="cuda", dtype=torch.float32)            
+            self.t = torch.zeros((self.batch_size), device="cuda", dtype=torch.float32)
+            self.normals = torch.zeros((self.batch_size, 3), device="cuda", dtype=torch.float32)
             pass # we will generate data on the fly
 
         elif mode == "val":
@@ -258,9 +260,10 @@ class NBVHDataset(Dataset):
             self.bbox_idxs = torch.zeros((self.total_size), device="cuda", dtype=torch.uint32)
             self.mask = torch.zeros((self.total_size), device="cuda", dtype=torch.bool)
             self.t = torch.zeros((self.total_size), device="cuda", dtype=torch.float32)
+            self.normals = torch.zeros((self.total_size, 3), device="cuda", dtype=torch.float32)
             
             print("Generating rays for validation set...", end=" ", flush=True)
-            self.bvh.bbox_raygen(self.total_size, self.ray_origins, self.ray_ends, self.mask, self.t, self.bbox_idxs)
+            self.bvh.bbox_raygen(self.total_size, self.ray_origins, self.ray_ends, self.mask, self.t, self.bbox_idxs, self.normals)
             torch.cuda.synchronize()
             print("Done!")
 
@@ -296,7 +299,7 @@ class NBVHDataset(Dataset):
                 't': self.t[s:e]
             }
         
-        self.bvh.bbox_raygen(self.batch_size, self.ray_origins, self.ray_ends, self.mask, self.t, self.bbox_idxs)
+        self.bvh.bbox_raygen(self.batch_size, self.ray_origins, self.ray_ends, self.mask, self.t, self.bbox_idxs, self.normals)
 
         return {
             'ray_origins': self.ray_origins,
