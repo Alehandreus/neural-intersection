@@ -98,48 +98,63 @@ class Trainer:
         img_dist = torch.zeros((self.img_size * self.img_size, 1), device="cuda")
         img_mask_pred = torch.zeros((self.img_size * self.img_size, 1), device="cuda")
         img_dist_pred = torch.zeros((self.img_size * self.img_size, 1), device="cuda")
+        img_normal_pred = torch.zeros((self.img_size * self.img_size, 3), device="cuda")
+        img_normal = torch.zeros((self.img_size * self.img_size, 3), device="cuda")
 
         bar = tqdm(range(self.ds_cam.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_cam.get_batch(batch_idx)
-            mask_pred, dist_pred = self.model(batch, initial=initial)
+            mask_pred, dist_pred, normal_pred = self.model(batch, initial=initial)
 
             batch_size = mask_pred.shape[0]
             img_mask_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = mask_pred[:, None]
             img_dist_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = dist_pred[:, None]
             img_dist[batch_idx * batch_size : (batch_idx + 1) * batch_size] = batch.t[:, None]
+            img_normal_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = normal_pred
+            img_normal[batch_idx * batch_size : (batch_idx + 1) * batch_size] = batch.normals
 
         img_dist = img_dist.reshape(1, self.img_size, self.img_size, 1)
         img_mask_pred = img_mask_pred.reshape(1, self.img_size, self.img_size, 1)
         img_dist_pred = img_dist_pred.reshape(1, self.img_size, self.img_size, 1) * (img_mask_pred > 0)
+        img_normal_pred = img_normal_pred.reshape(1, self.img_size, self.img_size, 3)
+        img_normal = img_normal.reshape(1, self.img_size, self.img_size, 3)
 
-        mse = ((img_dist - img_dist_pred) ** 2).mean()
+        light_dir = torch.tensor([1.0, -1.0, 1.0], device="cuda")
+        light_dir /= torch.norm(light_dir)
+
+        colors = torch.sum(img_normal * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
+        colors_pred = torch.sum(img_normal_pred * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
+
+        colors[img_dist == 0] = 0
+        colors_pred[img_mask_pred == 0] = 0
+
+        mse = ((colors - colors_pred) ** 2).mean()
         print(f"Cam mse: {mse:.3f}")
 
         self.writer.add_scalar("MSE/cam", mse.item(), self.n_steps)
 
         fig, ax = plt.subplots(1, 2, figsize=(10, 5))
         ax[0].axis("off")
-        ax[0].imshow(img_dist[0].cpu().numpy() ** 2, cmap="gray")
+        ax[0].imshow(colors[0].cpu().numpy() ** 2, cmap="gray")
         ax[1].axis("off")
-        ax[1].imshow(img_dist_pred[0].cpu().numpy() ** 2, cmap="gray")
+        ax[1].imshow(colors_pred[0].cpu().numpy() ** 2, cmap="gray")
         plt.tight_layout()
         plt.savefig("fig.png")
         plt.close()
 
         ##############################
 
-        img_dist = cut_edges(img_dist)
-        img_dist_pred = cut_edges(img_dist_pred)
-        mse_edge = F.mse_loss(img_dist, img_dist_pred).item()
+        colors = cut_edges(colors)
+        colors_pred = cut_edges(colors_pred)
+        mse_edge = F.mse_loss(colors, colors_pred).item()
 
         self.writer.add_scalar("MSE/cam_edge", mse_edge, self.n_steps)
 
         fig, ax = plt.subplots(1, 2, figsize=(10, 5))
         ax[0].axis("off")
-        ax[0].imshow(img_dist[0].cpu().numpy() ** 2, cmap="gray")
+        ax[0].imshow(colors[0].cpu().numpy() ** 2, cmap="gray")
         ax[1].axis("off")
-        ax[1].imshow(img_dist_pred[0].cpu().numpy() ** 2, cmap="gray")
+        ax[1].imshow(colors_pred[0].cpu().numpy() ** 2, cmap="gray")
         plt.tight_layout()
         plt.savefig("fig_edge.png")
         plt.close()

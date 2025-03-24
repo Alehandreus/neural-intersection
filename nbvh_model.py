@@ -252,7 +252,7 @@ class NBVHModel(nn.Module):
         self.encoder = encoder
         self.in_dim = self.n_points * self.encoder.out_dim()
         self.inner_dim = inner_dim
-        self.out_dim = 2
+        self.out_dim = 5
         self.n_layers = n_layers
         self.mlp = tcnn.Network(self.in_dim, self.out_dim, {
             "otype": "CutlassMLP",
@@ -274,15 +274,20 @@ class NBVHModel(nn.Module):
 
         a = self.mlp(bbox_features).float()
 
-        pred_cls, pred_dist = a[:, 0], a[:, 1]
+        pred_cls = a[:, 0]
+        pred_dist = a[:, 1]
+        pred_normal = a[:, 2:5]
         lengths = torch.norm(end - orig, dim=1)
         pred_dist = pred_dist * lengths
 
         if initial:
             pred_cls.fill_(100)
             pred_dist.fill_(0)
+            pred_normal.fill_(1)
 
-        return pred_cls, pred_dist
+        pred_normal = pred_normal / torch.norm(pred_normal, dim=-1, keepdim=True)
+
+        return pred_cls, pred_dist, pred_normal
 
     def get_loss(self, batch):
         orig = batch.ray_origins
@@ -291,14 +296,15 @@ class NBVHModel(nn.Module):
         hit_mask = batch.mask
         dist = batch.t
 
-        pred_cls, pred_dist = self.net_forward(orig, end, bbox_idxs, initial=False)
+        pred_cls, pred_dist, pred_normal = self.net_forward(orig, end, bbox_idxs, initial=False)
         
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float()) * 10 #, weight=hit_mask.float() * 0.9 + 0.1)
-        mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask]) if hit_mask.sum() > 0 else torch.tensor(0, device="cuda", dtype=torch.float32)
+        mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask])
+        norm_mse_loss = F.mse_loss(pred_normal[hit_mask], batch.normals[hit_mask])
 
         acc = ((pred_cls > 0) == hit_mask).float().mean().item()
 
-        loss = cls_loss + mse_loss
+        loss = cls_loss + mse_loss + norm_mse_loss * 10
 
         return loss, acc, mse_loss
 
@@ -309,6 +315,7 @@ class NBVHModel(nn.Module):
         n_rays = orig.shape[0]
 
         dist = torch.ones((n_rays,), dtype=torch.float32).cuda() * 1e9
+        normals = torch.zeros((n_rays, 3), dtype=torch.float32, device="cuda")
 
         self.bvh.reset_stack(n_rays)
 
@@ -324,16 +331,18 @@ class NBVHModel(nn.Module):
             inp_vec = vec * (cur_t2 - cur_t1)[:, None]
             inp_end = inp_orig + inp_vec
 
-            pred_cls_c, pred_dist_c = self.net_forward(inp_orig[cur_mask], inp_end[cur_mask], cur_bbox_idxs.long()[cur_mask].to(torch.uint32), initial=initial)
+            pred_cls_c, pred_dist_c, pred_normal_c = self.net_forward(inp_orig[cur_mask], inp_end[cur_mask], cur_bbox_idxs.long()[cur_mask].to(torch.uint32), initial=initial)
 
             pred_cls = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, pred_cls_c)
             pred_dist = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, pred_dist_c) + cur_t1
+            pred_normals = torch.zeros((n_rays, 3), device="cuda").masked_scatter_(cur_mask[:, None].expand(-1, 3), pred_normal_c)
 
             update_mask = (pred_cls > 0) & (pred_dist < dist) & cur_mask
             dist[update_mask] = pred_dist[update_mask]
+            normals[update_mask] = pred_normals[update_mask]
 
             alive = self.bvh.traverse(orig, vec, cur_mask, cur_t1, cur_t2, cur_bbox_idxs, cur_normals, TreeType.NBVH, TraverseMode.ANOTHER_BBOX)
 
         dist[dist == 1e9] = 0
 
-        return dist > 0, dist
+        return dist > 0, dist, normals
