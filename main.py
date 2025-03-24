@@ -26,14 +26,14 @@ def main(cfg):
     bvh = GPUTraverser(bvh_data)
     bvh.init_rand_state(cfg.train.total_size)
     nbvh_depth = 11
-    bvh.grow_nbvh(5)
-    # bvh.grow_nbvh(nbvh_depth - 1)
+    # bvh.grow_nbvh(5)
+    bvh.grow_nbvh(nbvh_depth - 1)
 
     trainer = Trainer(cfg, tqdm_leave=True, bvh=bvh)
 
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=10, finest_resolution=256, bvh_data=bvh_data, bvh=bvh)
-    # encoder = BBoxEncoder(cfg, enc_dim=2, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
-    encoder = HashBBoxEncoder(cfg, table_size=2**13, enc_dim=4, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
+    encoder = BBoxEncoder(cfg, enc_dim=2, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
+    # encoder = HashBBoxEncoder(cfg, table_size=2**13, enc_dim=4, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
 
     model = NBVHModel(
         cfg=cfg,
@@ -54,7 +54,7 @@ def main(cfg):
         trainer.val()
         trainer.cam()
 
-        if i < nbvh_depth - 1 - 5:
+        if i < nbvh_depth - 1:
             bvh.grow_nbvh(1)
 
 

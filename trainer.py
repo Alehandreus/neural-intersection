@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from myutils.misc import MetricLogger, get_num_params, cut_edges
-from data import RayTraceDataset, BlenderDataset, NBVHDataset
+from data import NBVHDataset
 
 
 class Trainer:
@@ -15,24 +15,11 @@ class Trainer:
 
         self.img_size = cfg.cam.img_size
 
-        # precomputed rays from images
-        if self.cfg.mode == "multiview":
-            self.ds_train = BlenderDataset(cfg.train).cuda()
-            self.ds_val = BlenderDataset(cfg.val).cuda()
-            self.ds_cam = BlenderDataset(cfg.cam).cuda()
-
-        # generate rays on the fly with bvh
-        elif self.cfg.mode == "raytrace":
-            self.ds_train = RayTraceDataset(cfg, "train", bvh=bvh)
-            self.ds_val = RayTraceDataset(cfg, "val", bvh=bvh)
-            self.ds_cam = RayTraceDataset(cfg, "cam", bvh=bvh)
-
         # generate rays in bvh leaves
-        elif self.cfg.mode == "nbvh":
+        if self.cfg.mode == "nbvh":
             self.ds_train = NBVHDataset(cfg, "train", bvh=bvh)
             self.ds_val = NBVHDataset(cfg, "val", bvh=bvh)
-            self.ds_cam = RayTraceDataset(cfg, "cam", bvh=bvh)
-        
+            self.ds_cam = NBVHDataset(cfg, "cam", bvh=bvh)        
         else:
             raise ValueError(f"Unknown trainer mode: {self.cfg.mode}")
 
@@ -52,41 +39,18 @@ class Trainer:
         self.n_steps = 0
         self.n_epoch = 0
 
-        total_bytes = 0
-
         encoder_bytes = self.model.encoder.get_num_parameters() * 4
         print(f"Encoder bytes: {encoder_bytes} ({encoder_bytes / 1e6:.3f}MB)")
 
         net_bytes = get_num_params(self.model.mlp) * 4
         print(f"Net params: {net_bytes} ({net_bytes / 1e6:.3f}MB)")
 
-        # if hasattr(self.model, "encoder"):
-        #     encoder_bytes = get_num_params(self.model.encoder)
-        #     total_bytes += encoder_bytes
-        #     print(f"Encoder bytes: {encoder_bytes} ({encoder_bytes / 1e6:.3f}MB)")
-
-        # if hasattr(self.model, "net"):
-        #     net_bytes = get_num_params(self.model.net)
-        #     total_bytes += net_bytes
-        #     print(f"Net params: {net_bytes} ({net_bytes / 1e6:.3f}MB)")
-
-        # if hasattr(self.model, "bvh_data"):
-        #     bvh_bytes = self.model.bvh_data.nodes_memory_bytes()
-        #     total_bytes += bvh_bytes
-        #     print(f"Bvh bytes: {bvh_bytes} ({bvh_bytes / 1e6:.3f}MB)")
-
-        # print(f"Total bytes: {total_bytes} ({total_bytes / 1e6:.3f}MB)")
-
-        # print(f"Total params: {get_num_params(self.model)}")
-
     def train(self):
-        self.ds_train.shuffle()
-
         bar = tqdm(range(self.ds_train.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_train.get_batch(batch_idx)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=False):
-                loss, acc, mse = self.model.get_loss(batch['ray_origins'], batch['ray_vectors'], batch['bbox_idxs'], batch['mask'], batch['t'])
+                loss, acc, mse = self.model.get_loss(batch)
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -113,7 +77,7 @@ class Trainer:
         bar = tqdm(range(self.ds_val.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_val.get_batch(batch_idx)
-            loss, acc, mse = self.model.get_loss(batch['ray_origins'], batch['ray_vectors'], batch['bbox_idxs'], batch['mask'], batch['t'])
+            loss, acc, mse = self.model.get_loss(batch)
 
             val_loss += loss.item()
             val_acc += acc
@@ -138,12 +102,12 @@ class Trainer:
         bar = tqdm(range(self.ds_cam.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_cam.get_batch(batch_idx)
-            mask_pred, dist_pred = self.model(batch['ray_origins'], batch['ray_vectors'], initial=initial)
+            mask_pred, dist_pred = self.model(batch, initial=initial)
 
             batch_size = mask_pred.shape[0]
             img_mask_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = mask_pred[:, None]
             img_dist_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = dist_pred[:, None]
-            img_dist[batch_idx * batch_size : (batch_idx + 1) * batch_size] = batch['t'][:, None]
+            img_dist[batch_idx * batch_size : (batch_idx + 1) * batch_size] = batch.t[:, None]
 
         img_dist = img_dist.reshape(1, self.img_size, self.img_size, 1)
         img_mask_pred = img_mask_pred.reshape(1, self.img_size, self.img_size, 1)

@@ -284,7 +284,13 @@ class NBVHModel(nn.Module):
 
         return pred_cls, pred_dist
 
-    def get_loss(self, orig, end, bbox_idxs, hit_mask, dist):
+    def get_loss(self, batch):
+        orig = batch.ray_origins
+        end = batch.ray_vectors
+        bbox_idxs = batch.bbox_idxs
+        hit_mask = batch.mask
+        dist = batch.t
+
         pred_cls, pred_dist = self.net_forward(orig, end, bbox_idxs, initial=False)
         
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float()) * 10 #, weight=hit_mask.float() * 0.9 + 0.1)
@@ -296,7 +302,10 @@ class NBVHModel(nn.Module):
 
         return loss, acc, mse_loss
 
-    def forward(self, orig, vec, initial=False):
+    def forward(self, batch, initial=False):
+        orig = batch.ray_origins
+        vec = batch.ray_vectors
+
         n_rays = orig.shape[0]
 
         dist = torch.ones((n_rays,), dtype=torch.float32).cuda() * 1e9

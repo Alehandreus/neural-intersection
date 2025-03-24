@@ -10,48 +10,6 @@ from myutils.math import *
 EPS = 1e-8
 
 
-def generate_camera_rays(bvh, mesh_center, mesh_extent, img_size):
-    cam_pos = torch.tensor([
-        mesh_center[0] + mesh_extent * 1.0,
-        mesh_center[1] - mesh_extent * 1.5,
-        mesh_center[2] + mesh_extent * 0.5,
-    ], device='cuda')
-    ray_origins = cam_pos.repeat(img_size * img_size, 1)
-    cam_dir = (mesh_center - cam_pos) * 0.9
-
-    x_dir = torch.cross(cam_dir, torch.tensor([0., 0., 1.], device='cuda'), dim=0)
-    x_dir = x_dir / torch.norm(x_dir) * (mesh_extent / 2)
-
-    y_dir = -torch.cross(x_dir, cam_dir, dim=0)
-    y_dir = y_dir / torch.norm(y_dir) * (mesh_extent / 2)
-
-    x_coords, y_coords = torch.meshgrid(
-        torch.linspace(-1, 1, img_size, device='cuda'),
-        torch.linspace(-1, 1, img_size, device='cuda'),
-        indexing='xy',
-    )
-
-    x_coords = x_coords.flatten()
-    y_coords = y_coords.flatten()
-
-    ray_vectors = cam_dir[None, :] + x_dir[None, :] * x_coords[:, None] + y_dir[None, :] * y_coords[:, None]
-    ray_vectors = ray_vectors / torch.norm(ray_vectors, dim=1, keepdim=True)
-
-    mask = torch.ones(img_size * img_size, device='cuda', dtype=torch.bool)
-    t1 = torch.ones(img_size * img_size, device='cuda', dtype=torch.float32)
-    t2 = torch.ones(img_size * img_size, device='cuda', dtype=torch.float32)
-    node_idxs = torch.zeros(img_size * img_size, device='cuda', dtype=torch.uint32)
-    normals = torch.zeros(img_size * img_size, 3, device='cuda', dtype=torch.float32)
-    bvh.traverse(ray_origins, ray_vectors, mask, t1, t2, node_idxs, normals, TreeType.BVH, TraverseMode.CLOSEST_PRIMITIVE)
-
-    return {
-        'ray_origins': ray_origins,
-        'ray_vectors': ray_vectors,
-        'mask': mask,
-        't': t1,
-    }
-
-
 def get_rays_np(scene_info, c2w, coords=None, use_viewdir=True, use_pixel_centers=True):
     H, W, K = scene_info["H"], scene_info["W"], scene_info["K"]
     pixel_center = 0.5 if use_pixel_centers else 0.0
