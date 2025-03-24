@@ -54,10 +54,10 @@ class Trainer:
 
         total_bytes = 0
 
-        encoder_bytes = self.model.encoder.get_num_parameters()
+        encoder_bytes = self.model.encoder.get_num_parameters() * 4
         print(f"Encoder bytes: {encoder_bytes} ({encoder_bytes / 1e6:.3f}MB)")
 
-        net_bytes = get_num_params(self.model.mlp)
+        net_bytes = get_num_params(self.model.mlp) * 4
         print(f"Net params: {net_bytes} ({net_bytes / 1e6:.3f}MB)")
 
         # if hasattr(self.model, "encoder"):

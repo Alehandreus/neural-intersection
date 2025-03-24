@@ -45,14 +45,14 @@ def interpolate_bbox_features(x, bbox_feature):
     return x
     
 
-
 class BBoxEncoder(nn.Module):
-    def __init__(self, cfg, enc_dim, enc_depth, bvh_data, bvh):
+    def __init__(self, cfg, enc_dim, enc_depth, total_depth, bvh_data, bvh):
         super().__init__()
 
         self.cfg = cfg
         self.enc_dim = enc_dim
         self.enc_depth = enc_depth
+        self.total_depth = total_depth
         self.bvh_data = bvh_data
         self.bvh = bvh
 
@@ -64,6 +64,83 @@ class BBoxEncoder(nn.Module):
         self.nodes_center = (self.nodes_min + self.nodes_max) * 0.5
 
         self.bbox_emb = nn.Embedding(self.bvh_data.n_nodes, self.enc_dim * 8, device='cuda')
+
+    def forward(self, inp, bbox_idxs):
+        n_rays = inp.shape[0]
+        n_points = inp.shape[1]
+
+        depth = torch.zeros((n_rays,), dtype=torch.int).cuda()
+        history = torch.zeros((n_rays, 64), dtype=torch.uint32).cuda()
+        masks = torch.ones((n_rays,), dtype=torch.bool, device="cuda")
+        self.bvh.fill_history(masks, bbox_idxs, depth, history)
+        depth_l = depth.long()
+        history_l = history.long()
+
+        bbox_features = [torch.zeros((n_rays, self.enc_dim * n_points), device="cuda") for _ in range(self.enc_depth)]
+        max_depth = depth_l.max()
+        max_depth = min(max_depth, self.enc_depth)
+        
+        for i in range(max_depth):
+            path_bbox_idxs = history_l[:, i]
+            path_nodes_min = self.nodes_min[path_bbox_idxs]
+            extent = self.nodes_extent[path_bbox_idxs]
+            path_inp = (inp - path_nodes_min[:, None, :]) / extent[:, None, :]
+            path_inp = path_inp.clamp(0, 1)
+
+            path_bbox_feature = self.bbox_emb(path_bbox_idxs)
+            path_bbox_feature = interpolate_bbox_features(path_inp, path_bbox_feature)
+            bbox_features[i] = path_bbox_feature
+
+        bbox_features = torch.cat(bbox_features, dim=1)
+
+        return bbox_features
+    
+    def out_dim(self):
+        return self.enc_dim * self.enc_depth
+    
+    def get_num_parameters(self):
+        return (2 ** self.total_depth) * self.enc_dim * 8
+    
+
+class HashBBoxEncoder(nn.Module):
+    def __init__(self, cfg, table_size, enc_dim, enc_depth, total_depth, bvh_data, bvh):
+        super().__init__()
+
+        self.cfg = cfg
+        self.table_size = table_size
+        self.enc_dim = enc_dim
+        self.enc_depth = enc_depth
+        self.total_depth = total_depth
+        self.bvh_data = bvh_data
+        self.bvh = bvh
+
+        self.pis = torch.tensor([
+            774_363_409,
+            2_654_435_761,
+            805_459_861,
+            100_000_007,
+            334_363_391,
+            1_334_363_413,
+            734_363_407,
+            2_134_363_393,
+        ], device='cuda')
+        self.const = 0x9E3779B9
+        self.corners = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8], device='cuda')
+
+        nodes_min, nodes_max = bvh_data.nodes_data()
+        self.nodes_min = torch.tensor(nodes_min, device='cuda')
+        self.nodes_max = torch.tensor(nodes_max, device='cuda')
+        self.nodes_extent = self.nodes_max - self.nodes_min
+        self.nodes_extent[self.nodes_extent == 0] = 0.5
+        self.nodes_center = (self.nodes_min + self.nodes_max) * 0.5
+
+        self.bbox_emb = nn.Embedding(self.table_size, self.enc_dim, device='cuda')
+
+    def hash(self, bbox_idxs):
+        x = bbox_idxs[:, None].expand(-1, 8)
+        x = x ^ (self.corners[None, :] * self.pis[None, :])
+        x = x % self.table_size
+        return x
 
     def forward(self, inp, bbox_idxs):
         n_rays = inp.shape[0]
@@ -86,7 +163,9 @@ class BBoxEncoder(nn.Module):
             path_inp = (inp - path_nodes_min[:, None, :]) / extent[:, None, :]
             path_inp = path_inp.clamp(0, 1)
 
-            path_bbox_feature = self.bbox_emb(path_bbox_idxs)
+            table_idxs = self.hash(path_bbox_idxs)            
+            path_bbox_feature = self.bbox_emb(table_idxs)
+            path_bbox_feature = path_bbox_feature.reshape(n_rays, -1)
             path_bbox_feature = interpolate_bbox_features(path_inp, path_bbox_feature)
 
             bbox_features[i] = path_bbox_feature
@@ -99,7 +178,7 @@ class BBoxEncoder(nn.Module):
         return self.enc_dim * self.enc_depth
     
     def get_num_parameters(self):
-        return (2 ** self.enc_depth) * self.enc_dim * 8 * 4
+        return self.table_size * self.enc_dim
     
 
 class HashGridEncoder(nn.Module):
@@ -188,7 +267,7 @@ class NBVHModel(nn.Module):
 
         if type(self.encoder) == HashGridEncoder:
             bbox_features = self.encoder(inp)
-        elif type(self.encoder) == BBoxEncoder:
+        elif type(self.encoder) in [BBoxEncoder, HashBBoxEncoder]:
             bbox_features = self.encoder(inp, bbox_idxs)
         else:
             raise NotImplementedError

@@ -4,7 +4,7 @@ import torch
 from myutils.misc import *
 from myutils.ray import *
 
-from nbvh_model import NBVHModel, HashGridEncoder, BBoxEncoder
+from nbvh_model import NBVHModel, HashGridEncoder, BBoxEncoder, HashBBoxEncoder
 from trainer import Trainer
 
 from bvh import Mesh, CPUBuilder, GPUTraverser
@@ -25,24 +25,27 @@ def main(cfg):
 
     bvh = GPUTraverser(bvh_data)
     bvh.init_rand_state(cfg.train.total_size)
-    bvh.grow_nbvh(13)
+    nbvh_depth = 11
+    bvh.grow_nbvh(5)
+    # bvh.grow_nbvh(nbvh_depth - 1)
 
     trainer = Trainer(cfg, tqdm_leave=True, bvh=bvh)
 
-    encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=16, finest_resolution=256, bvh_data=bvh_data, bvh=bvh)
-    # encoder = BBoxEncoder(cfg, enc_dim=4, enc_depth=14, bvh_data=bvh_data, bvh=bvh)
+    # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=10, finest_resolution=256, bvh_data=bvh_data, bvh=bvh)
+    # encoder = BBoxEncoder(cfg, enc_dim=2, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
+    encoder = HashBBoxEncoder(cfg, table_size=2**13, enc_dim=4, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
 
     model = NBVHModel(
         cfg=cfg,
-        n_layers=6,
-        inner_dim=256,
+        n_layers=4,
+        inner_dim=64,
         n_points=3,
         encoder=encoder,
         bvh_data=bvh_data,
         bvh=bvh,
     )
 
-    name = "exp5"
+    name = "exp_hashbbox"
     trainer.set_model(model, name)
     trainer.cam(initial=True)
     for i in range(100):
@@ -51,7 +54,8 @@ def main(cfg):
         trainer.val()
         trainer.cam()
 
-        # bvh.grow_nbvh(1)
+        if i < nbvh_depth - 1 - 5:
+            bvh.grow_nbvh(1)
 
 
 if __name__ == "__main__":
