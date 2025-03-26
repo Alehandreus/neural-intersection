@@ -254,13 +254,26 @@ class NBVHModel(nn.Module):
         self.inner_dim = inner_dim
         self.out_dim = 5
         self.n_layers = n_layers
-        self.mlp = tcnn.Network(self.in_dim, self.out_dim, {
-            "otype": "CutlassMLP",
-            "activation": "ReLU",
-            "output_activation": "None",
-            "n_neurons": self.inner_dim,
-            "n_hidden_layers": self.n_layers,
-        })
+        # self.mlp = tcnn.Network(self.in_dim, self.out_dim, {
+        #     "otype": "CutlassMLP",
+        #     "activation": "ReLU",
+        #     "output_activation": "None",
+        #     "n_neurons": self.inner_dim,
+        #     "n_hidden_layers": self.n_layers,
+        # })
+        self.mlp = nn.Sequential(
+            nn.Linear(self.in_dim, self.inner_dim),
+            nn.ReLU(),
+            nn.Linear(self.inner_dim, self.inner_dim),
+            nn.ReLU(),
+            nn.Linear(self.inner_dim, self.inner_dim),
+            nn.ReLU(),
+            nn.Linear(self.inner_dim, self.inner_dim),
+            nn.ReLU(),
+            nn.Linear(self.inner_dim, self.inner_dim),
+            nn.ReLU(),
+            nn.Linear(self.inner_dim, self.out_dim),
+        ).cuda()
 
     def net_forward(self, orig, end, bbox_idxs, initial=False):
         inp = orig[..., None, :] + (end - orig)[..., None, :] * self.ts[None, :, None]
@@ -296,15 +309,49 @@ class NBVHModel(nn.Module):
         hit_mask = batch.mask
         dist = batch.t
 
+        # print(orig.shape)
+        # print(hit_mask.sum())
+        # print(bbox_idxs[:100])
+        # print(hit_mask[:100])
+        # print(dist[:100])
+
+        # if (1 / orig).isnan().sum() > 0:
+        #     print("raygen nan")
+        #     exit()
+        # print(orig.isnan().sum(), end.isnan().sum(), bbox_idxs.isnan().sum(), hit_mask.isnan().sum(), dist.isnan().sum())
         pred_cls, pred_dist, pred_normal = self.net_forward(orig, end, bbox_idxs, initial=False)
+
+        # print(hit_mask.float()[:100])
+        # print(pred_cls[:100])
+        # print(pred_normal.isnan().sum())
+
+        # a = batch.normals[hit_mask].isnan().sum()
+        # b = pred_normal[hit_mask].isnan().sum()
+        # c = orig.isnan().sum()
+        # d = dist.isnan().sum()
+        # if a > 0 or b > 0 or c > 0 or d > 0:
+        #     print(a, b, c, d)
+        #     exit()
         
-        cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float()) * 10 #, weight=hit_mask.float() * 0.9 + 0.1)
+        # print(dist[hit_mask].max().item(), dist[hit_mask].min().item())
+        # cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float()) * 10 #, weight=hit_mask.float() * 0.9 + 0.1)
+        cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float(), weight=hit_mask.float() * 9 + 1)
         mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask])
         norm_mse_loss = F.mse_loss(pred_normal[hit_mask], batch.normals[hit_mask])
+        # norm_mse_loss = F.l1_loss(pred_normal[hit_mask], batch.normals[hit_mask])
 
         acc = ((pred_cls > 0) == hit_mask).float().mean().item()
 
-        loss = cls_loss + mse_loss + norm_mse_loss * 10
+        # print(cls_loss, mse_loss, norm_mse_loss)
+        # if cls_loss.isnan() or mse_loss.isnan() or norm_mse_loss.isnan():
+        #     print("NAN")
+        #     # exit()
+
+        loss = cls_loss# + norm_mse_loss * 4
+        # loss = cls_loss + norm_mse_loss
+        # if acc > 0.80:
+        #     loss = cls_loss + norm_mse_loss * 10
+        # loss = cls_loss
 
         return loss, acc, mse_loss
 

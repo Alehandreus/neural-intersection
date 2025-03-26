@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from myutils.ray import *
 
-from bvh import Mesh, CPUBuilder, GPUTraverser
+from bvh import Mesh, CPUBuilder, GPUTraverser, GPURayGen
 
 
 @dataclass
@@ -55,6 +55,17 @@ class BatchData:
 
         return res
     
+    def get_compacted(self, n_rays):
+        return BatchData(
+            n_rays,
+            self.ray_origins[:n_rays],
+            self.ray_vectors[:n_rays],
+            self.mask[:n_rays],
+            self.t[:n_rays],
+            self.bbox_idxs[:n_rays],
+            self.normals[:n_rays]
+        )
+
 
 def generate_camera_rays(bvh, mesh_center, mesh_extent, img_size):
     batch_data = BatchData.init_zeros(img_size * img_size)
@@ -114,15 +125,18 @@ class NBVHDataset(Dataset):
         if mode == "train":            
             self.total_size = cfg[mode].total_size            
             self.batch_data = BatchData.init_zeros(self.batch_size)
+            self.raygen = GPURayGen(self.bvh, self.batch_size)
             pass # we will generate data on the fly
 
         elif mode == "val":
             self.total_size = cfg[mode].total_size
             self.batch_data = BatchData.init_zeros(self.total_size)
+            self.raygen = GPURayGen(self.bvh, self.total_size)
             print("Generating rays for validation set...", end=" ", flush=True)
-            self.fill_batch_data()
+            self.total_size = self.fill_batch_data()
             torch.cuda.synchronize()
             print("Done!")
+            self.batch_data = self.batch_data.get_compacted(self.total_size)
 
         elif mode == "cam":
             self.img_size = cfg.cam.img_size
@@ -141,10 +155,9 @@ class NBVHDataset(Dataset):
             self.batch_data = generate_camera_rays(self.bvh, self.mesh_center, mesh_extent, self.img_size)
             torch.cuda.synchronize()
             print("Done!")
-    
+
     def fill_batch_data(self):
-        self.bvh.bbox_raygen(
-            self.batch_data.n_rays, 
+        n_generated = self.raygen.raygen(
             self.batch_data.ray_origins, 
             self.batch_data.ray_vectors, 
             self.batch_data.mask, 
@@ -152,6 +165,7 @@ class NBVHDataset(Dataset):
             self.batch_data.bbox_idxs, 
             self.batch_data.normals,
         )
+        return n_generated
     
     def __len__(self):
         return self.total_size
@@ -169,5 +183,5 @@ class NBVHDataset(Dataset):
             e = s + self.batch_size
             return self.batch_data.get_slice(s, e)
 
-        self.fill_batch_data()
-        return self.batch_data
+        n_generated = self.fill_batch_data()
+        return self.batch_data.get_compacted(n_generated)

@@ -29,6 +29,7 @@ class Trainer:
         self.model = model
 
         self.optimizer = torch.optim.Adam(model.parameters(), lr=self.cfg.train.lr)
+        # self.scaler = torch.amp.GradScaler('cuda')
 
         self.alpha = 0.99
         self.logger_loss = MetricLogger(self.alpha)
@@ -49,12 +50,14 @@ class Trainer:
         bar = tqdm(range(self.ds_train.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_train.get_batch(batch_idx)
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=False):
-                loss, acc, mse = self.model.get_loss(batch)
+            loss, acc, mse = self.model.get_loss(batch)
 
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
+            # self.scaler.scale(loss).backward()
+            # self.scaler.step(self.optimizer)
+            # self.scaler.update()
 
             self.logger_loss.update(loss.item())
             self.logger_acc.update(acc)
@@ -124,6 +127,9 @@ class Trainer:
 
         colors = torch.sum(img_normal * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
         colors_pred = torch.sum(img_normal_pred * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
+
+        # colors = (img_dist > 0).float()
+        colors_pred = (img_dist_pred > 0).float()
 
         colors[img_dist == 0] = 0
         colors_pred[img_mask_pred == 0] = 0
