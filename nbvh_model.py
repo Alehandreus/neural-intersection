@@ -293,6 +293,8 @@ class NBVHModel(nn.Module):
         lengths = torch.norm(end - orig, dim=1)
         pred_dist = pred_dist * lengths
 
+        # pred_dist = F.sigmoid(pred_dist)
+
         if initial:
             pred_cls.fill_(100)
             pred_dist.fill_(0)
@@ -321,9 +323,7 @@ class NBVHModel(nn.Module):
         # print(orig.isnan().sum(), end.isnan().sum(), bbox_idxs.isnan().sum(), hit_mask.isnan().sum(), dist.isnan().sum())
         pred_cls, pred_dist, pred_normal = self.net_forward(orig, end, bbox_idxs, initial=False)
 
-        # print(hit_mask.float()[:100])
-        # print(pred_cls[:100])
-        # print(pred_normal.isnan().sum())
+        # print(dist[hit_mask].max())
 
         # a = batch.normals[hit_mask].isnan().sum()
         # b = pred_normal[hit_mask].isnan().sum()
@@ -347,8 +347,8 @@ class NBVHModel(nn.Module):
         #     print("NAN")
         #     # exit()
 
-        loss = cls_loss# + norm_mse_loss * 4
-        # loss = cls_loss + norm_mse_loss
+        # loss = cls_loss + mse_loss
+        loss = cls_loss + norm_mse_loss + mse_loss
         # if acc > 0.80:
         #     loss = cls_loss + norm_mse_loss * 10
         # loss = cls_loss

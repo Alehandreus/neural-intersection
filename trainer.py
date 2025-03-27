@@ -129,7 +129,10 @@ class Trainer:
         colors_pred = torch.sum(img_normal_pred * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
 
         # colors = (img_dist > 0).float()
-        colors_pred = (img_dist_pred > 0).float()
+        # colors_pred = (img_dist_pred > 0).float()
+
+        # colors = img_dist
+        # colors_pred = img_dist_pred
 
         colors[img_dist == 0] = 0
         colors_pred[img_mask_pred == 0] = 0
