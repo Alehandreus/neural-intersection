@@ -10,6 +10,54 @@ from trainer import Trainer
 from bvh import Mesh, CPUBuilder, GPUTraverser, GPURayGen
 
 
+def save_rays_blender(bvh, batch_size):
+    print("raygen...")
+    raygen = GPURayGen(bvh, batch_size)
+    ray_origins = torch.zeros((batch_size, 3), device="cuda", dtype=torch.float32)
+    ray_vectors = torch.zeros((batch_size, 3), device="cuda", dtype=torch.float32)
+    t1 = torch.zeros((batch_size,), device="cuda", dtype=torch.float32)
+    t2 = torch.zeros((batch_size,), device="cuda", dtype=torch.float32)
+    masks = torch.zeros((batch_size,), device="cuda", dtype=torch.bool)
+    bbox_idxs = torch.zeros((batch_size,), device="cuda", dtype=torch.uint32)
+    normals = torch.zeros((batch_size, 3), device="cuda", dtype=torch.float32)
+    bvh.grow_nbvh(18)
+    for i in range(8):
+        print(raygen.raygen(ray_origins, ray_vectors, masks, t1, bbox_idxs, normals))
+        print(t1.max())
+
+    print(masks.sum())    
+
+    # def save_line_segments_to_obj(origins, ends, t1s, filename):
+    with open("rays.obj", 'w') as f:
+        vertex_index = 1
+        for (p1, p2, t, normal, mask) in zip(ray_origins, ray_vectors, t1, normals, masks):
+            if not mask.item(): continue
+            # if t < 1.0: continue
+
+            # Ensure tensors are on CPU and convert to Python floats
+            p3 = p1 + (p2 - p1) * t
+            p4 = p3 + normal * 0.1
+            p1 = p1.cpu().squeeze()
+            p2 = p2.cpu().squeeze()
+            p3 = p3.cpu().squeeze()
+            p4 = p4.cpu().squeeze()
+            
+            # Write vertices (swap Y and Z if Blender's Y-up vs your data's Z-up)
+            f.write(f'v {p1[0].item()} {p1[1].item()} {p1[2].item()}\n')  # Original axes
+            # If your data is Z-up, use: f.write(f'v {p1[0]} {p1[2]} {p1[1]}\n')
+            f.write(f'v {p2[0].item()} {p2[1].item()} {p2[2].item()}\n')
+            
+            f.write(f'v {p3[0].item()} {p3[1].item()} {p3[2].item()}\n')
+
+            f.write(f'v {p4[0].item()} {p4[1].item()} {p4[2].item()}\n')
+            
+            # Write line
+            # f.write(f'l {vertex_index} {vertex_index + 1}\n')
+            # f.write(f'l {vertex_index} {vertex_index + 2}\n')
+            # f.write(f'l {vertex_index + 2} {vertex_index + 1}\n')
+            f.write(f'l {vertex_index + 2} {vertex_index + 3}\n')
+            vertex_index += 4
+
 @hydra.main(config_path="config", config_name="nbvh", version_base=None)
 def main(cfg):
     torch.set_float32_matmul_precision("high")
@@ -24,56 +72,8 @@ def main(cfg):
     print("BVH leaves:", bvh_data.n_leaves)
 
     bvh = GPUTraverser(bvh_data)
-    
-    # batch_size = 100000
-    # print("raygen...")
-    # raygen = GPURayGen(bvh, batch_size)
-    # ray_origins = torch.zeros((batch_size, 3), device="cuda", dtype=torch.float32)
-    # ray_vectors = torch.zeros((batch_size, 3), device="cuda", dtype=torch.float32)
-    # t1 = torch.zeros((batch_size,), device="cuda", dtype=torch.float32)
-    # t2 = torch.zeros((batch_size,), device="cuda", dtype=torch.float32)
-    # masks = torch.zeros((batch_size,), device="cuda", dtype=torch.bool)
-    # bbox_idxs = torch.zeros((batch_size,), device="cuda", dtype=torch.uint32)
-    # normals = torch.zeros((batch_size, 3), device="cuda", dtype=torch.float32)
-    # bvh.grow_nbvh(18)
-    # for i in range(8):
-    #     print(raygen.raygen(ray_origins, ray_vectors, masks, t1, bbox_idxs, normals))
-    #     print(t1.max())
 
-    # print(masks.sum())    
-
-    # # def save_line_segments_to_obj(origins, ends, t1s, filename):
-    # with open("rays.obj", 'w') as f:
-    #     vertex_index = 1
-    #     for (p1, p2, t, normal, mask) in zip(ray_origins, ray_vectors, t1, normals, masks):
-    #         if not mask.item(): continue
-    #         # if t < 1.0: continue
-
-    #         # Ensure tensors are on CPU and convert to Python floats
-    #         p3 = p1 + (p2 - p1) * t
-    #         p4 = p3 + normal * 0.1
-    #         p1 = p1.cpu().squeeze()
-    #         p2 = p2.cpu().squeeze()
-    #         p3 = p3.cpu().squeeze()
-    #         p4 = p4.cpu().squeeze()
-            
-    #         # Write vertices (swap Y and Z if Blender's Y-up vs your data's Z-up)
-    #         f.write(f'v {p1[0].item()} {p1[1].item()} {p1[2].item()}\n')  # Original axes
-    #         # If your data is Z-up, use: f.write(f'v {p1[0]} {p1[2]} {p1[1]}\n')
-    #         f.write(f'v {p2[0].item()} {p2[1].item()} {p2[2].item()}\n')
-            
-    #         f.write(f'v {p3[0].item()} {p3[1].item()} {p3[2].item()}\n')
-
-    #         f.write(f'v {p4[0].item()} {p4[1].item()} {p4[2].item()}\n')
-            
-    #         # Write line
-    #         # f.write(f'l {vertex_index} {vertex_index + 1}\n')
-    #         # f.write(f'l {vertex_index} {vertex_index + 2}\n')
-    #         # f.write(f'l {vertex_index + 2} {vertex_index + 1}\n')
-    #         f.write(f'l {vertex_index + 2} {vertex_index + 3}\n')
-    #         vertex_index += 4
-
-    # exit()
+    # save_rays_blender(bvh, 100000)
 
     nbvh_depth = 13
     # bvh.grow_nbvh(5)
