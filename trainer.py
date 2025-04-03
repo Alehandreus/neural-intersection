@@ -2,6 +2,8 @@ import time
 import torch
 from torch import nn
 from torch.nn import functional as F
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
@@ -35,6 +37,7 @@ class Trainer:
         self.logger_loss = MetricLogger(self.alpha)
         self.logger_acc = MetricLogger(self.alpha)
         self.logger_mse = MetricLogger(self.alpha)
+        self.logger_norm_mse = MetricLogger(self.alpha)
 
         self.writer = SummaryWriter(self.cfg.log_dir + '/' + name)
         self.n_steps = 0
@@ -50,7 +53,7 @@ class Trainer:
         bar = tqdm(range(self.ds_train.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_train.get_batch(batch_idx)
-            loss, acc, mse = self.model.get_loss(batch)
+            loss, acc, mse, norm_mse = self.model.get_loss(batch)
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -62,41 +65,47 @@ class Trainer:
             self.logger_loss.update(loss.item())
             self.logger_acc.update(acc)
             self.logger_mse.update(mse.item())
+            self.logger_norm_mse.update(norm_mse.item())
 
-            bar.set_description(f"loss: {self.logger_loss.ema():.3f}, acc: {self.logger_acc.ema():.3f}, mse: {self.logger_mse.ema():.3f}")
+            bar.set_description(f"loss: {self.logger_loss.ema():.3f}, acc: {self.logger_acc.ema():.3f}, mse: {self.logger_mse.ema():.3f}, norm_mse: {self.logger_norm_mse.ema():.3f}")
 
             self.writer.add_scalar("Loss/train", self.logger_loss.ema(), self.n_steps)
             self.writer.add_scalar("Acc/train", self.logger_acc.ema(), self.n_steps)
             self.writer.add_scalar("MSE/train", self.logger_mse.ema(), self.n_steps)
+            self.writer.add_scalar("NormMSE/train", self.logger_norm_mse.ema(), self.n_steps)
             self.n_steps += 1
 
         self.n_epoch += 1
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def val(self):
         val_loss = 0
         val_acc = 0
         val_mse = 0
+        val_norm_mse = 0
         bar = tqdm(range(self.ds_val.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_val.get_batch(batch_idx)
-            loss, acc, mse = self.model.get_loss(batch)
+            loss, acc, mse, norm_mse = self.model.get_loss(batch)
 
             val_loss += loss.item()
             val_acc += acc
             val_mse += mse.item()
+            val_norm_mse += mse.item() / (batch.normals ** 2).mean().item()
 
-            bar.set_description(f"val_loss: {val_loss / (batch_idx + 1):.3f}, val_acc: {val_acc / (batch_idx + 1):.3f}, mse: {val_mse / (batch_idx + 1):.3f}")
+            bar.set_description(f"val_loss: {val_loss / (batch_idx + 1):.3f}, val_acc: {val_acc / (batch_idx + 1):.3f}, mse: {val_mse / (batch_idx + 1):.3f}, norm_mse: {val_norm_mse / (batch_idx + 1):.3f}")
 
         val_loss /= self.ds_val.n_batches()
         val_acc /= self.ds_val.n_batches()
         val_mse /= self.ds_val.n_batches()
+        val_norm_mse /= self.ds_val.n_batches()
 
         self.writer.add_scalar("Loss/val", val_loss, self.n_steps)
         self.writer.add_scalar("Acc/val", val_acc, self.n_steps)
         self.writer.add_scalar("MSE/val", val_mse, self.n_steps)
+        self.writer.add_scalar("NormMSE/val", val_norm_mse, self.n_steps)
 
-    @torch.no_grad()
+    # @torch.no_grad()
     def cam(self, initial=False):
         img_dist = torch.zeros((self.img_size * self.img_size, 1), device="cuda")
         img_mask_pred = torch.zeros((self.img_size * self.img_size, 1), device="cuda")
@@ -108,6 +117,9 @@ class Trainer:
         for batch_idx in bar:
             batch = self.ds_cam.get_batch(batch_idx)
             mask_pred, dist_pred, normal_pred = self.model(batch, initial=initial)
+            
+            dist_pred = dist_pred.detach()
+            normal_pred = normal_pred.detach()
 
             batch_size = mask_pred.shape[0]
             img_mask_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = mask_pred[:, None]
@@ -128,6 +140,7 @@ class Trainer:
         colors = torch.sum(img_normal * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
         colors_pred = torch.sum(img_normal_pred * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
 
+        # print(colors.isnan().sum(), colors_pred.isnan().sum())
         # colors = (img_dist > 0).float()
         # colors_pred = (img_dist_pred > 0).float()
 
@@ -138,7 +151,11 @@ class Trainer:
         colors_pred[img_mask_pred == 0] = 0
 
         mse = ((colors - colors_pred) ** 2).mean()
-        print(f"Cam mse: {mse:.3f}")
+        print(f"Cam mse: {mse:.5f}")
+
+        # banana for reference
+        colors[0, 0, 0] = 1.0
+        colors_pred[0, 0, 0] = 1.0
 
         self.writer.add_scalar("MSE/cam", mse.item(), self.n_steps)
 
@@ -150,6 +167,7 @@ class Trainer:
         plt.tight_layout()
         plt.savefig("fig.png")
         plt.close()
+        plt.clf()
 
         ##############################
 
@@ -167,3 +185,4 @@ class Trainer:
         plt.tight_layout()
         plt.savefig("fig_edge.png")
         plt.close()
+        plt.clf()

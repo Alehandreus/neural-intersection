@@ -184,4 +184,5 @@ class NBVHDataset(Dataset):
             return self.batch_data.get_slice(s, e)
 
         n_generated = self.fill_batch_data()
+        
         return self.batch_data.get_compacted(n_generated)
