@@ -91,7 +91,7 @@ class Trainer:
             val_loss += loss.item()
             val_acc += acc
             val_mse += mse.item()
-            val_norm_mse += mse.item() / (batch.normals ** 2).mean().item()
+            val_norm_mse += norm_mse.item()
 
             bar.set_description(f"val_loss: {val_loss / (batch_idx + 1):.3f}, val_acc: {val_acc / (batch_idx + 1):.3f}, mse: {val_mse / (batch_idx + 1):.3f}, norm_mse: {val_norm_mse / (batch_idx + 1):.3f}")
 

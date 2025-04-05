@@ -131,9 +131,9 @@ class NBVHDataset(Dataset):
         elif mode == "val":
             self.total_size = cfg[mode].total_size
             self.batch_data = BatchData.init_zeros(self.total_size)
-            self.raygen = GPURayGen(self.bvh, self.total_size)
+            self.raygen = GPURayGen(self.bvh, self.batch_size)
             print("Generating rays for validation set...", end=" ", flush=True)
-            self.total_size = self.fill_batch_data()
+            # self.total_size = self.fill_batch_data()
             torch.cuda.synchronize()
             print("Done!")
             self.batch_data = self.batch_data.get_compacted(self.total_size)
@@ -166,10 +166,10 @@ class NBVHDataset(Dataset):
             self.batch_data.normals,
         )
         return n_generated
-    
+
     def __len__(self):
         return self.total_size
-    
+
     def __getitem__(self, index):
         assert self.mode in ["val", "cam"]
         return self.batch_data[index]
@@ -178,11 +178,19 @@ class NBVHDataset(Dataset):
         return len(self) // self.batch_size
 
     def get_batch(self, index):
+        if self.mode == "val":
+            n_generated = self.fill_batch_data()
+            batch = self.batch_data.get_compacted(n_generated)
+            return batch
+
         if self.mode in ["val", "cam"]:
             s = index * self.batch_size
             e = s + self.batch_size
+            # print(self.batch_data.normals[self.batch_data.mask].mean())
             return self.batch_data.get_slice(s, e)
 
         n_generated = self.fill_batch_data()
+        batch = self.batch_data.get_compacted(n_generated)
+        # print(batch.normals[batch.mask].mean())
         
-        return self.batch_data.get_compacted(n_generated)
+        return batch

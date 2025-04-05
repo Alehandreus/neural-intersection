@@ -465,7 +465,8 @@ class NBVHModel(nn.Module):
         dist = batch.t
 
         m = (batch.normals * (end - orig)).sum(dim=-1) > 0
-        batch.normals[m, :] *= -1
+        # batch.normals[m, :] *= -1
+        print(m[hit_mask].sum(), (~m)[hit_mask].sum())
 
         pred_cls, pred_dist, pred_normal = self.net_forward(orig, end, bbox_idxs, initial=False)
         

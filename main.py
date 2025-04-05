@@ -111,7 +111,7 @@ def main(cfg):
     for i in range(100):
         print("Epoch", i)
         trainer.train()
-        trainer.val()
+        # trainer.val()
         trainer.cam()
 
         # if i < nbvh_depth - 1:
