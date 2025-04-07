@@ -43,6 +43,64 @@ def interpolate_bbox_features(x, bbox_feature):
     x = x.reshape(x.shape[0], -1)
 
     return x
+
+
+class HashGridEncoder(nn.Module):
+    def __init__(
+        self,
+        cfg,
+        dim=3,
+        n_levels=16,
+        n_features_per_level=2,
+        log2_hashmap_size=15,
+        base_resolution=16,
+        finest_resolution=512,
+        bvh_data=None,
+        bvh=None,
+    ):
+        super().__init__()
+
+        assert bvh_data is not None
+        assert bvh is not None
+
+        self.cfg = cfg
+        self.n_levels = n_levels
+        self.n_dim = n_features_per_level
+
+        mesh = Mesh(cfg.mesh.path)
+        mesh_min, mesh_max = mesh.bounds()
+        self.mesh_min = torch.tensor(mesh_min, device='cuda')
+        self.mesh_max = torch.tensor(mesh_max, device='cuda')
+        self.sphere_center = (self.mesh_min + self.mesh_max) * 0.5
+        self.sphere_radius = torch.norm(self.mesh_max - self.mesh_min) * 0.5      
+
+        self.input_dim = dim
+        b = (finest_resolution / base_resolution) ** (1 / (n_levels - 1))
+        config = {
+            "otype": "Grid",
+            "type": "Hash",
+            "n_levels": n_levels,
+            "n_features_per_level": n_features_per_level,
+            "log2_hashmap_size": log2_hashmap_size,
+            "base_resolution": base_resolution,
+            # 'finest_resolution': finest_resolution,
+            "per_level_scale": b,
+        }
+        self.enc = tcnn.Encoding(self.input_dim, config)
+
+    def forward(self, x):
+        n_rays = x.shape[0]
+        x = (x - self.mesh_min) / (self.mesh_max - self.mesh_min)
+        x = x.reshape(-1, self.input_dim)
+        x = self.enc(x).float()
+        x = x.reshape(n_rays, -1)
+        return x   
+
+    def out_dim(self):
+        return self.n_levels * self.n_dim  
+    
+    def get_num_parameters(self):
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
     
 
 class BBoxEncoder(nn.Module):
@@ -211,9 +269,40 @@ class HashMultiBBoxEncoder(nn.Module):
         self.bbox_emb = nn.Embedding(self.table_size, self.enc_dim, device='cuda')
 
         min_dims = self.nodes_extent.min(axis=1)[0]
-        self.bbox_dims = (self.nodes_extent / min_dims[:, None]).round().long()
-        self.bbox_dims = torch.ones((self.bvh_data.n_nodes, 3), device='cuda')# * 2
-        # print(self.bbox_dims[100:200])
+        self.bbox_dims = (self.nodes_extent / min_dims[:, None]).round().long() * 2
+        self.bbox_dims = torch.ones((self.bvh_data.n_nodes, 3), device='cuda') * 8
+
+        base_resolution = 16
+        finest_resolution = 256
+        n_levels = 16
+        b = (finest_resolution / base_resolution) ** (1 / (n_levels - 1))
+        config = {
+            "otype": "Grid",
+            "type": "Hash",
+            "n_levels": n_levels,
+            "n_features_per_level": self.enc_dim,
+            "log2_hashmap_size": 12,
+            "base_resolution": base_resolution,
+            "per_level_scale": b,
+        }
+        # self.hashgrids = torch.ModuleList([
+        #     tcnn.Encoding(3, config) for _ in range(8)
+        # ])
+        self.hashgrid = tcnn.Encoding(3, config)
+        self.hashgrid2 = tcnn.Encoding(3, config)
+        self.offsets = nn.Embedding(len(self.nodes_min), 3, device='cuda')
+        self.scales = nn.Embedding(len(self.nodes_min), 3, device='cuda')
+        self.bbox_featuers = nn.Embedding(len(self.nodes_min), 8, device='cuda')
+        self.transform = nn.Sequential(
+            nn.Linear(3 + 8, 16),
+            nn.ReLU(),
+            nn.Linear(16, 16),
+            nn.ReLU(),
+            # nn.Linear(16, 16),
+            # nn.ReLU(),
+            nn.Linear(16, 3),
+            # nn.Sigmoid(),
+        ).cuda()
 
     def hash(self, bbox_idxs):
         x = bbox_idxs[:, None].expand(-1, 8)
@@ -317,13 +406,14 @@ class HashMultiBBoxEncoder(nn.Module):
             path_inp = path_inp.clamp(0, 1)
 
             inp_packed = path_inp.reshape(-1, 3)
-            path_bbox_feature = self.encode_bbox(inp_packed, path_bbox_idxs[:, None].expand(-1, n_points).flatten())
+            a = path_bbox_idxs[:, None].expand(-1, n_points).flatten()
+            x = (inp_packed - 0.5) * self.scales(a) * 0.1 + self.offsets(a)
+            y = torch.cat([(inp_packed - 0.5), self.bbox_featuers(a)], dim=-1)
+            # y = torch.cat([self.hashgrid2(inp_packed), self.bbox_featuers(a)], dim=-1)
+            y = self.transform(y)
+            path_bbox_feature = self.hashgrid(y).float()
+            # path_bbox_feature = self.encode_bbox(inp_packed, path_bbox_idxs[:, None].expand(-1, n_points).flatten())
             path_bbox_feature = path_bbox_feature.reshape(n_rays, -1)
-
-            # table_idxs = self.hash(path_bbox_idxs)            
-            # path_bbox_feature = self.bbox_emb(table_idxs)
-            # path_bbox_feature = path_bbox_feature.reshape(n_rays, -1)
-            # path_bbox_feature = interpolate_bbox_features(path_inp, path_bbox_feature)
 
             bbox_features[i] = path_bbox_feature
 
@@ -332,68 +422,10 @@ class HashMultiBBoxEncoder(nn.Module):
         return bbox_features
     
     def out_dim(self):
-        return self.enc_dim * self.enc_depth
+        return self.enc_dim * self.enc_depth * 16
     
     def get_num_parameters(self):
         return self.table_size * self.enc_dim
-
-
-class HashGridEncoder(nn.Module):
-    def __init__(
-        self,
-        cfg,
-        dim=3,
-        n_levels=16,
-        n_features_per_level=2,
-        log2_hashmap_size=15,
-        base_resolution=16,
-        finest_resolution=512,
-        bvh_data=None,
-        bvh=None,
-    ):
-        super().__init__()
-
-        assert bvh_data is not None
-        assert bvh is not None
-
-        self.cfg = cfg
-        self.n_levels = n_levels
-        self.n_dim = n_features_per_level
-
-        mesh = Mesh(cfg.mesh.path)
-        mesh_min, mesh_max = mesh.bounds()
-        self.mesh_min = torch.tensor(mesh_min, device='cuda')
-        self.mesh_max = torch.tensor(mesh_max, device='cuda')
-        self.sphere_center = (self.mesh_min + self.mesh_max) * 0.5
-        self.sphere_radius = torch.norm(self.mesh_max - self.mesh_min) * 0.5      
-
-        self.input_dim = dim
-        b = (finest_resolution / base_resolution) ** (1 / (n_levels - 1))
-        config = {
-            "otype": "Grid",
-            "type": "Hash",
-            "n_levels": n_levels,
-            "n_features_per_level": n_features_per_level,
-            "log2_hashmap_size": log2_hashmap_size,
-            "base_resolution": base_resolution,
-            # 'finest_resolution': finest_resolution,
-            "per_level_scale": b,
-        }
-        self.enc = tcnn.Encoding(self.input_dim, config)
-
-    def forward(self, x):
-        n_rays = x.shape[0]
-        x = (x - self.mesh_min) / (self.mesh_max - self.mesh_min)
-        x = x.reshape(-1, self.input_dim)
-        x = self.enc(x).float()
-        x = x.reshape(n_rays, -1)
-        return x   
-
-    def out_dim(self):
-        return self.n_levels * self.n_dim  
-    
-    def get_num_parameters(self):
-        return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
 class NBVHModel(nn.Module):
@@ -425,9 +457,11 @@ class NBVHModel(nn.Module):
             nn.Linear(self.inner_dim, self.out_dim),
         ).cuda()
 
+        self.days = 0
+
     def net_forward(self, orig, end, bbox_idxs, initial=False):
         orig = orig.clone()
-        orig.requires_grad = True
+        # orig.requires_grad = True
         inp = orig[..., None, :] + (end - orig)[..., None, :] * self.ts[None, :, None]
 
         if type(self.encoder) == HashGridEncoder:
@@ -445,7 +479,7 @@ class NBVHModel(nn.Module):
         lengths = torch.norm(end - orig, dim=1)
         pred_dist = pred_dist * lengths
 
-        pred_normal = torch.autograd.grad(pred_dist, orig, grad_outputs=torch.ones_like(pred_dist), create_graph=True)[0]
+        # pred_normal = torch.autograd.grad(pred_dist, orig, grad_outputs=torch.ones_like(pred_dist), create_graph=True)[0]
 
         if initial:
             pred_cls.fill_(100)
@@ -464,16 +498,75 @@ class NBVHModel(nn.Module):
         hit_mask = batch.mask
         dist = batch.t
 
-        m = (batch.normals * (end - orig)).sum(dim=-1) > 0
-        # batch.normals[m, :] *= -1
-        print(m[hit_mask].sum(), (~m)[hit_mask].sum())
+        # print(f"Total rays: {orig.shape[0]}; Hit: {hit_mask.sum().item()}; Miss: {orig.shape[0] - hit_mask.sum().item()} ({hit_mask.sum().item() / orig.shape[0] * 100:.2f}%)")
+        # self.days += 1
+        # if self.days > 10:
+        #     exit()
 
+        # print(hit_mask.float().mean().item())
+
+        # print(orig.shape)
+
+        # m = (batch.normals * (end - orig)).sum(dim=-1) > 0
+        m = (dist > 1.001) | (dist < -0.001) & hit_mask
+        # m = (dist > 1.0) & hit_mask
+
+        # print(dist[hit_mask].mean())
+
+        # batch.normals[m, :] *= -1
+
+        # if bbox_idxs.long().min() < 0 or bbox_idxs.long().max() > 10:
+        #     print(hit_mask.sum(), orig.shape)
+        #     print(bbox_idxs.long().min(), bbox_idxs.long().max())
+            # print(bbox_idxs.long()[hit_mask])
+
+        # if m[hit_mask].sum().item() > 0:
+        #     print(123)
+
+        n_rays = orig.shape[0]
+        depth = torch.zeros((n_rays,), dtype=torch.int).cuda()
+        history = torch.zeros((n_rays, 64), dtype=torch.uint32).cuda()
+        masks = torch.ones((n_rays,), dtype=torch.bool, device="cuda")
+        self.bvh.fill_history(masks, bbox_idxs, depth, history)
+
+        # print(bbox_idxs.long().min(), bbox_idxs.long().max())
+
+        # print(orig[0])
+        # print(end[0])
+        # print((end - orig)[0])
+        # print(batch.normals[0])
+        # print(batch.t[0])
+        # print(batch.bbox_idxs.long()[0])
+        # print(f"History: {history.long()[0, :depth.long()[0].max()]}")
+
+        # print(dist[hit_mask].max().item(), dist[hit_mask].min().item(), dist[hit_mask].mean().item())
+
+        if m[hit_mask].sum().item() > 0:
+            print(f"Warning: tmax = {dist[hit_mask].max().item():.5f}, tmin = {dist[hit_mask].min().item():.5f} ({m[hit_mask].sum().item()})")
+
+        # if m[hit_mask].sum().item() > 0:
+        #     print(m[hit_mask].sum().item(), (~m)[hit_mask].sum().item())
+        #     print(bbox_idxs.long().min(), bbox_idxs.long().max())
+        #     print(f"Depth: {depth[m]}")
+        #     print(f"Bbox: {bbox_idxs.long()[m]}")
+        #     print(orig[m])
+        #     print(end[m])
+        #     print((end - orig)[m])
+        #     print(batch.normals[m])
+        #     print(batch.t[m])
+        #     print(batch.bbox_idxs.long()[m])
+        #     print(f"History: {history.long()[m, :depth.long()[m].max()]}")
+
+        # if m[hit_mask].sum().item() > 0:
+        #     exit()
+
+        length = torch.norm(end - orig, dim=1)
         pred_cls, pred_dist, pred_normal = self.net_forward(orig, end, bbox_idxs, initial=False)
         
         # print(dist[hit_mask].max().item(), dist[hit_mask].min().item())
         # cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float()) * 10 #, weight=hit_mask.float() * 0.9 + 0.1)
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float(), weight=hit_mask.float() * 0 + 1)
-        mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask])
+        mse_loss = F.mse_loss((pred_dist * length)[hit_mask], (dist * length)[hit_mask])
         norm_mse_loss = F.mse_loss(pred_normal[hit_mask], batch.normals[hit_mask])
         # norm_mse_loss = F.l1_loss(pred_normal[hit_mask], batch.normals[hit_mask])
 

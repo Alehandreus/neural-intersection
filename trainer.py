@@ -134,7 +134,8 @@ class Trainer:
         img_normal_pred = img_normal_pred.reshape(1, self.img_size, self.img_size, 3)
         img_normal = img_normal.reshape(1, self.img_size, self.img_size, 3)
 
-        light_dir = torch.tensor([1.0, -1.0, 1.0], device="cuda")
+        # light_dir = torch.tensor([1.0, -1.0, 1.0], device="cuda")
+        light_dir = torch.tensor([1.0, -2.0, 1.5], device="cuda")
         light_dir /= torch.norm(light_dir)
 
         colors = torch.sum(img_normal * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
@@ -149,6 +150,22 @@ class Trainer:
 
         colors[img_dist == 0] = 0
         colors_pred[img_mask_pred == 0] = 0
+
+        # from collections import defaultdict
+        # normals = defaultdict(int)
+        # for i in range(self.img_size):
+        #     for j in range(self.img_size):
+        #         if img_dist[0, i, j] > 0:
+        #             # normals.add(tuple(img_normal[0, i, j].cpu().numpy()))
+        #             # normals[(i, j)] = img_normal[0, i, j].cpu().numpy()
+        #             normals[tuple(img_normal[0, i, j].cpu().numpy())] += 1
+        # # normals = list(normals)
+        # # print(f"Normals: {len(normals)}")
+        # for k, v in normals.items():
+        #     print(f"Normal: {k}, count: {v}")
+        # # for n in normals:
+        # #     print(f"Normal: {n}")
+        # exit()
 
         mse = ((colors - colors_pred) ** 2).mean()
         print(f"Cam mse: {mse:.5f}")

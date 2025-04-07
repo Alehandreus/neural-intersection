@@ -69,10 +69,10 @@ def main(cfg):
     torch.set_float32_matmul_precision("high")
 
     mesh = Mesh(cfg.mesh.path)
-    mesh.split_faces(0.95)
+    # mesh.split_faces(0.95)
     builder = CPUBuilder(mesh)
     bvh_data = builder.build_bvh(cfg.mesh.bvh_depth)
-    bvh_data.save_as_obj("bvh.obj", 15)
+    bvh_data.save_as_obj("bvh.obj", 13)
 
     print("BVH nodes:", bvh_data.n_nodes)
     print("BVH leaves:", bvh_data.n_leaves)
@@ -82,16 +82,18 @@ def main(cfg):
     # save_rays_blender(bvh_data, bvh, 100000)
     # exit()
 
-    nbvh_depth = 13
-    # bvh.grow_nbvh(5)
+    nbvh_depth = 12
+    # bvh.grow_nbvh(2)
+    # bvh.grow_nbvh(10)
     bvh.grow_nbvh(nbvh_depth - 1)
 
     trainer = Trainer(cfg, tqdm_leave=True, bvh=bvh)
 
     encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=12, finest_resolution=256, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=21, finest_resolution=512, bvh_data=bvh_data, bvh=bvh)
-    # encoder = BBoxEncoder(cfg, enc_dim=2, enc_depth=12, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
-    # encoder = HashBBoxEncoder(cfg, table_size=2**13, enc_dim=16, enc_depth=12, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
+    # encoder = BBoxEncoder(cfg, enc_dim=2, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
+    # encoder = HashBBoxEncoder(cfg, table_size=2**13, enc_dim=16, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
+    # encoder = HashMultiBBoxEncoder(cfg, table_size=2**15, enc_dim=2, enc_depth=3, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashMultiBBoxEncoder(cfg, table_size=2**14, enc_dim=8, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashMultiBBoxEncoder(cfg, table_size=2**12, enc_dim=32, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
 
