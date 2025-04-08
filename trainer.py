@@ -53,7 +53,7 @@ class Trainer:
         bar = tqdm(range(self.ds_train.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_train.get_batch(batch_idx)
-            loss, acc, mse, norm_mse = self.model.get_loss(batch)
+            loss, acc, mse, norm_mse = self.model.get_loss(batch, bar=bar)
 
             self.optimizer.zero_grad()
             loss.backward()
@@ -113,10 +113,12 @@ class Trainer:
         img_normal_pred = torch.zeros((self.img_size * self.img_size, 3), device="cuda")
         img_normal = torch.zeros((self.img_size * self.img_size, 3), device="cuda")
 
+        self.model.reset_acc()
+
         bar = tqdm(range(self.ds_cam.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_cam.get_batch(batch_idx)
-            mask_pred, dist_pred, normal_pred = self.model(batch, initial=initial)
+            mask_pred, dist_pred, normal_pred = self.model(batch, initial=initial, true_dist=batch.t)
             
             dist_pred = dist_pred.detach()
             normal_pred = normal_pred.detach()
@@ -127,6 +129,8 @@ class Trainer:
             img_dist[batch_idx * batch_size : (batch_idx + 1) * batch_size] = batch.t[:, None]
             img_normal_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = normal_pred
             img_normal[batch_idx * batch_size : (batch_idx + 1) * batch_size] = batch.normals
+        
+        print(f"Cam acc: {self.model.acc_nom / self.model.acc_denom:.4f}")
 
         img_dist = img_dist.reshape(1, self.img_size, self.img_size, 1)
         img_mask_pred = img_mask_pred.reshape(1, self.img_size, self.img_size, 1)
@@ -141,7 +145,6 @@ class Trainer:
         colors = torch.sum(img_normal * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
         colors_pred = torch.sum(img_normal_pred * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
 
-        # print(colors.isnan().sum(), colors_pred.isnan().sum())
         # colors = (img_dist > 0).float()
         # colors_pred = (img_dist_pred > 0).float()
 
@@ -151,24 +154,11 @@ class Trainer:
         colors[img_dist == 0] = 0
         colors_pred[img_mask_pred == 0] = 0
 
-        # from collections import defaultdict
-        # normals = defaultdict(int)
-        # for i in range(self.img_size):
-        #     for j in range(self.img_size):
-        #         if img_dist[0, i, j] > 0:
-        #             # normals.add(tuple(img_normal[0, i, j].cpu().numpy()))
-        #             # normals[(i, j)] = img_normal[0, i, j].cpu().numpy()
-        #             normals[tuple(img_normal[0, i, j].cpu().numpy())] += 1
-        # # normals = list(normals)
-        # # print(f"Normals: {len(normals)}")
-        # for k, v in normals.items():
-        #     print(f"Normal: {k}, count: {v}")
-        # # for n in normals:
-        # #     print(f"Normal: {n}")
-        # exit()
-
         mse = ((colors - colors_pred) ** 2).mean()
         print(f"Cam mse: {mse:.5f}")
+
+        psnr = -10 * torch.log10(mse)
+        print(f"Cam psnr: {psnr:.5f}")
 
         # banana for reference
         colors[0, 0, 0] = 1.0
