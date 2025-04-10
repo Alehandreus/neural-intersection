@@ -96,17 +96,41 @@ def generate_camera_rays(bvh, mesh_center, mesh_extent, img_size):
     ray_vectors = cam_dir[None, :] + x_dir[None, :] * x_coords[:, None] + y_dir[None, :] * y_coords[:, None]
     batch_data.ray_vectors = ray_vectors / torch.norm(ray_vectors, dim=1, keepdim=True)
 
-    bvh.traverse(
-        batch_data.ray_origins,
-        batch_data.ray_vectors,
-        batch_data.mask,
-        batch_data.t,
-        batch_data.t,
-        batch_data.bbox_idxs,
-        batch_data.normals,
-        TreeType.BVH,
-        TraverseMode.CLOSEST_PRIMITIVE,
-    )
+    local_batch_size = 1000000
+    for i in range(0, img_size * img_size, local_batch_size):
+        cur_batch_size = min(local_batch_size, img_size * img_size - i)
+        local_batch_data = BatchData.init_zeros(local_batch_size)
+
+        s, e = i, (i + cur_batch_size)
+
+        bvh.traverse(
+            batch_data.ray_origins[s:e],
+            batch_data.ray_vectors[s:e],
+            local_batch_data.mask,
+            local_batch_data.t,
+            local_batch_data.t,
+            local_batch_data.bbox_idxs,
+            local_batch_data.normals,
+            TreeType.BVH,
+            TraverseMode.CLOSEST_PRIMITIVE,
+        )
+
+        batch_data.mask[s:e] = local_batch_data.mask[:cur_batch_size]
+        batch_data.t[s:e] = local_batch_data.t[:cur_batch_size]
+        batch_data.bbox_idxs[s:e] = local_batch_data.bbox_idxs[:cur_batch_size]
+        batch_data.normals[s:e] = local_batch_data.normals[:cur_batch_size]
+
+    # bvh.traverse(
+    #     batch_data.ray_origins,
+    #     batch_data.ray_vectors,
+    #     batch_data.mask,
+    #     batch_data.t,
+    #     batch_data.t,
+    #     batch_data.bbox_idxs,
+    #     batch_data.normals,
+    #     TreeType.BVH,
+    #     TraverseMode.CLOSEST_PRIMITIVE,
+    # )
 
     return batch_data
 

@@ -69,7 +69,7 @@ def main(cfg):
     torch.set_float32_matmul_precision("high")
 
     mesh = Mesh(cfg.mesh.path)
-    # mesh.split_faces(0.95)
+    mesh.split_faces(0.5)
     builder = CPUBuilder(mesh)
     bvh_data = builder.build_bvh(cfg.mesh.bvh_depth)
     bvh_data.save_as_obj("bvh.obj", 13)
@@ -82,21 +82,22 @@ def main(cfg):
     # save_rays_blender(bvh_data, bvh, 100000)
     # exit()
 
-    nbvh_depth = 12
+    nbvh_depth = 1
     # bvh.grow_nbvh(2)
     # bvh.grow_nbvh(10)
     bvh.grow_nbvh(nbvh_depth - 1)
 
     trainer = Trainer(cfg, tqdm_leave=True, bvh=bvh)
 
-    encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=12, finest_resolution=256, bvh_data=bvh_data, bvh=bvh)
+    # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=12, n_levels=8, finest_resolution=256, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=21, finest_resolution=512, bvh_data=bvh_data, bvh=bvh)
-    # encoder = BBoxEncoder(cfg, enc_dim=2, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
-    # encoder = HashBBoxEncoder(cfg, table_size=2**13, enc_dim=16, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
-    # encoder = HashMultiBBoxEncoder(cfg, table_size=2**15, enc_dim=2, enc_depth=3, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
-    # encoder = HashMultiBBoxEncoder(cfg, table_size=2**14, enc_dim=8, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
-    # encoder = HashMultiBBoxEncoder(cfg, table_size=2**12, enc_dim=32, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
-
+    # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=18, base_resolution=8, n_levels=8, finest_resolution=2 ** 8, n_features_per_level=4, bvh_data=bvh_data, bvh=bvh)
+    # encoder = BBoxEncoder(cfg, enc_dim=2, enc_depth=8, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
+    # encoder = HashBBoxEncoder(cfg, table_size=2**18, enc_dim=8, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
+    # encoder = HashMultiBBoxEncoder(cfg, table_size=2**11 * 3, enc_dim=24, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
+    # encoder = HashMultiBBoxEncoder(cfg, table_size=2**20, enc_dim=4, enc_depth=8, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
+    encoder = CodebookEncoder(cfg, enc_dim=16, enc_depth=4, full_depth=9, codebook_bitwidth=8)
+# 
     model = NBVHModel(
         cfg=cfg,
         n_layers=4,
@@ -107,13 +108,15 @@ def main(cfg):
         bvh=bvh,
     )
 
-    name = "exp_hashbbox"
+    name = "0"
     trainer.set_model(model, name)
     trainer.cam(initial=True)
     for i in range(100):
         print("Epoch", i)
         trainer.train()
         # trainer.val()
+        # encoder.grid.bake()
+        # encoder.grid.freeze()
         trainer.cam()
 
         # if i < nbvh_depth - 1:

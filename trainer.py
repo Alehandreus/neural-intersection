@@ -29,9 +29,15 @@ class Trainer:
 
     def set_model(self, model, name="run"):
         self.model = model
-
+        self.name = name
+        lr = self.cfg.train.lr
         self.optimizer = torch.optim.Adam(model.parameters(), lr=self.cfg.train.lr)
         # self.scaler = torch.amp.GradScaler('cuda')
+        # self.optimizer = torch.optim.Adam([
+        #     {'params': model.mlp.parameters(), 'lr': lr},
+        #     {'params': model.encoder.grid.features.parameters(), 'lr': lr},
+        #     {'params': model.encoder.grid.dictionary.parameters(), 'lr': lr * 100},
+        # ], lr=lr)
 
         self.alpha = 0.99
         self.logger_loss = MetricLogger(self.alpha)
@@ -39,7 +45,7 @@ class Trainer:
         self.logger_mse = MetricLogger(self.alpha)
         self.logger_norm_mse = MetricLogger(self.alpha)
 
-        self.writer = SummaryWriter(self.cfg.log_dir + '/' + name)
+        self.writer = SummaryWriter(self.cfg.log_dir + '/' + self.name)
         self.n_steps = 0
         self.n_epoch = 0
 
@@ -50,35 +56,40 @@ class Trainer:
         print(f"Net params: {net_bytes} ({net_bytes / 1e6:.3f}MB)")
 
     def train(self):
+        self.accumulate = 1
+
+        self.model.train()
+        self.optimizer.zero_grad()
+
         bar = tqdm(range(self.ds_train.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_train.get_batch(batch_idx)
             loss, acc, mse, norm_mse = self.model.get_loss(batch, bar=bar)
 
-            self.optimizer.zero_grad()
             loss.backward()
-            self.optimizer.step()
-            # self.scaler.scale(loss).backward()
-            # self.scaler.step(self.optimizer)
-            # self.scaler.update()
 
-            self.logger_loss.update(loss.item())
-            self.logger_acc.update(acc)
-            self.logger_mse.update(mse.item())
-            self.logger_norm_mse.update(norm_mse.item())
+            if batch_idx % self.accumulate == 0:
+                self.optimizer.step()
+                self.optimizer.zero_grad()
 
-            bar.set_description(f"loss: {self.logger_loss.ema():.3f}, acc: {self.logger_acc.ema():.3f}, mse: {self.logger_mse.ema():.3f}, norm_mse: {self.logger_norm_mse.ema():.3f}")
+                self.logger_loss.update(loss.item())
+                self.logger_acc.update(acc)
+                self.logger_mse.update(mse.item())
+                self.logger_norm_mse.update(norm_mse.item())
 
-            self.writer.add_scalar("Loss/train", self.logger_loss.ema(), self.n_steps)
-            self.writer.add_scalar("Acc/train", self.logger_acc.ema(), self.n_steps)
-            self.writer.add_scalar("MSE/train", self.logger_mse.ema(), self.n_steps)
-            self.writer.add_scalar("NormMSE/train", self.logger_norm_mse.ema(), self.n_steps)
+                bar.set_description(f"loss: {self.logger_loss.ema():.3f}, acc: {self.logger_acc.ema():.3f}, mse: {self.logger_mse.ema():.3f}, norm_mse: {self.logger_norm_mse.ema():.3f}")
+
+                self.writer.add_scalar("Loss/train", self.logger_loss.ema(), self.n_steps)
+                self.writer.add_scalar("Acc/train", self.logger_acc.ema(), self.n_steps)
+                self.writer.add_scalar("MSE/train", self.logger_mse.ema(), self.n_steps)
+                self.writer.add_scalar("NormMSE/train", self.logger_norm_mse.ema(), self.n_steps)
             self.n_steps += 1
 
         self.n_epoch += 1
 
-    # @torch.no_grad()
+    @torch.no_grad()
     def val(self):
+        self.model.eval()
         val_loss = 0
         val_acc = 0
         val_mse = 0
@@ -105,8 +116,9 @@ class Trainer:
         self.writer.add_scalar("MSE/val", val_mse, self.n_steps)
         self.writer.add_scalar("NormMSE/val", val_norm_mse, self.n_steps)
 
-    # @torch.no_grad()
+    @torch.no_grad()
     def cam(self, initial=False):
+        self.model.eval()
         img_dist = torch.zeros((self.img_size * self.img_size, 1), device="cuda")
         img_mask_pred = torch.zeros((self.img_size * self.img_size, 1), device="cuda")
         img_dist_pred = torch.zeros((self.img_size * self.img_size, 1), device="cuda")
@@ -160,36 +172,49 @@ class Trainer:
         psnr = -10 * torch.log10(mse)
         print(f"Cam psnr: {psnr:.5f}")
 
+        self.writer.add_scalar("PSNR/cam", psnr.item(), self.n_steps)
+
         # banana for reference
         colors[0, 0, 0] = 1.0
         colors_pred[0, 0, 0] = 1.0
 
+        import os
+        os.makedirs('images/' + self.name, exist_ok=True)
+        from PIL import Image
+        import numpy as np
+        Image.fromarray(
+            (colors[0, :, :, 0].cpu().numpy() * 255).astype(np.uint8)
+        ).convert("L").save(f"images/{self.name}/cam.png")
+        Image.fromarray(
+            (colors_pred[0, :, :, 0].cpu().numpy() * 255).astype(np.uint8)
+        ).convert("L").save(f"images/{self.name}/cam_pred.png")
+
         self.writer.add_scalar("MSE/cam", mse.item(), self.n_steps)
 
-        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-        ax[0].axis("off")
-        ax[0].imshow(colors[0].cpu().numpy() ** 2, cmap="gray")
-        ax[1].axis("off")
-        ax[1].imshow(colors_pred[0].cpu().numpy() ** 2, cmap="gray")
-        plt.tight_layout()
-        plt.savefig("fig.png")
-        plt.close()
-        plt.clf()
+        # fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+        # ax[0].axis("off")
+        # ax[0].imshow(colors[0].cpu().numpy() ** 2, cmap="gray")
+        # ax[1].axis("off")
+        # ax[1].imshow(colors_pred[0].cpu().numpy() ** 2, cmap="gray")
+        # plt.tight_layout()
+        # plt.savefig("fig.png")
+        # plt.close()
+        # plt.clf()
 
-        ##############################
+        # ##############################
 
-        colors = cut_edges(colors)
-        colors_pred = cut_edges(colors_pred)
-        mse_edge = F.mse_loss(colors, colors_pred).item()
+        # colors = cut_edges(colors)
+        # colors_pred = cut_edges(colors_pred)
+        # mse_edge = F.mse_loss(colors, colors_pred).item()
 
-        self.writer.add_scalar("MSE/cam_edge", mse_edge, self.n_steps)
+        # self.writer.add_scalar("MSE/cam_edge", mse_edge, self.n_steps)
 
-        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-        ax[0].axis("off")
-        ax[0].imshow(colors[0].cpu().numpy() ** 2, cmap="gray")
-        ax[1].axis("off")
-        ax[1].imshow(colors_pred[0].cpu().numpy() ** 2, cmap="gray")
-        plt.tight_layout()
-        plt.savefig("fig_edge.png")
-        plt.close()
-        plt.clf()
+        # fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+        # ax[0].axis("off")
+        # ax[0].imshow(colors[0].cpu().numpy() ** 2, cmap="gray")
+        # ax[1].axis("off")
+        # ax[1].imshow(colors_pred[0].cpu().numpy() ** 2, cmap="gray")
+        # plt.tight_layout()
+        # plt.savefig("fig_edge.png")
+        # plt.close()
+        # plt.clf()

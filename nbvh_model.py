@@ -11,6 +11,8 @@ from bvh import TreeType, TraverseMode
 from myutils.misc import *
 from myutils.ray import *
 
+import wisp
+
 
 def interpolate_bbox_features(x, bbox_feature):
     x = x.reshape(x.shape[0], -1, 3)
@@ -273,34 +275,34 @@ class HashMultiBBoxEncoder(nn.Module):
         # self.bbox_dims = (self.nodes_extent / min_dims[:, None]).round().long() * 2
         self.bbox_dims = torch.ones((self.bvh_data.n_nodes, 3), device='cuda') * 4
 
-        # base_resolution = 16
-        # finest_resolution = 256
-        # n_levels = 16
-        # b = (finest_resolution / base_resolution) ** (1 / (n_levels - 1))
-        # config = {
-        #     "otype": "Grid",
-        #     "type": "Hash",
-        #     "n_levels": n_levels,
-        #     "n_features_per_level": self.enc_dim,
-        #     "log2_hashmap_size": 12,
-        #     "base_resolution": base_resolution,
-        #     "per_level_scale": b,
-        # }
-        # self.hashgrid = tcnn.Encoding(3, config)
-        # self.hashgrid2 = tcnn.Encoding(3, config)
-        # self.offsets = nn.Embedding(len(self.nodes_min), 3, device='cuda')
-        # self.scales = nn.Embedding(len(self.nodes_min), 3, device='cuda')
-        # self.bbox_featuers = nn.Embedding(len(self.nodes_min), 8, device='cuda')
-        # self.transform = nn.Sequential(
-        #     nn.Linear(3 + 8, 16),
-        #     nn.ReLU(),
-        #     nn.Linear(16, 16),
-        #     nn.ReLU(),
-        #     # nn.Linear(16, 16),
-        #     # nn.ReLU(),
-        #     nn.Linear(16, 3),
-        #     # nn.Sigmoid(),
-        # ).cuda()
+        base_resolution = 16
+        finest_resolution = 256
+        n_levels = 16
+        b = (finest_resolution / base_resolution) ** (1 / (n_levels - 1))
+        config = {
+            "otype": "Grid",
+            "type": "Hash",
+            "n_levels": n_levels,
+            "n_features_per_level": self.enc_dim,
+            "log2_hashmap_size": 11,
+            "base_resolution": base_resolution,
+            "per_level_scale": b,
+        }
+        self.hashgrid = tcnn.Encoding(3, config)
+        self.hashgrid2 = tcnn.Encoding(3, config)
+        self.offsets = nn.Embedding(len(self.nodes_min), 3, device='cuda')
+        self.scales = nn.Embedding(len(self.nodes_min), 3, device='cuda')
+        self.bbox_featuers = nn.Embedding(len(self.nodes_min), 8, device='cuda')
+        self.transform = nn.Sequential(
+            nn.Linear(3 + 8, 16),
+            nn.ReLU(),
+            nn.Linear(16, 16),
+            nn.ReLU(),
+            # nn.Linear(16, 16),
+            # nn.ReLU(),
+            nn.Linear(16, 3),
+            # nn.Sigmoid(),
+        ).cuda()
 
     def hash(self, bbox_idxs):
         x = bbox_idxs[:, None].expand(-1, 8)
@@ -387,42 +389,6 @@ class HashMultiBBoxEncoder(nn.Module):
         return interpolated_feature
 
     def forward(self, inp, bbox_idxs):
-        n_rays = inp.shape[0]
-        n_points = inp.shape[1]
-
-        depth = torch.zeros((n_rays,), dtype=torch.int).cuda()
-        history = torch.zeros((n_rays, 64), dtype=torch.uint32).cuda()
-        masks = torch.ones((n_rays,), dtype=torch.bool, device="cuda")
-        self.bvh.fill_history(masks, bbox_idxs, depth, history)
-        depth_l = depth.long()
-        history_l = history.long()
-
-        bbox_features = [torch.zeros((n_rays, self.enc_dim * n_points), device="cuda") for _ in range(self.enc_depth)]
-        max_depth = depth_l.max()
-        max_depth = min(max_depth, self.enc_depth)
-
-        for i in range(max_depth):
-            path_bbox_idxs = history_l[:, i]
-            path_nodes_min = self.nodes_min[path_bbox_idxs]
-            extent = self.nodes_extent[path_bbox_idxs]
-            path_inp = (inp - path_nodes_min[:, None, :]) / extent[:, None, :]
-            path_inp = path_inp.clamp(0, 1)
-
-            inp_packed = path_inp.reshape(-1, 3)
-            path_bbox_feature = self.encode_bbox(inp_packed, path_bbox_idxs[:, None].expand(-1, n_points).flatten())
-            path_bbox_feature = path_bbox_feature.reshape(n_rays, -1)
-
-            # table_idxs = self.hash(path_bbox_idxs)            
-            # path_bbox_feature = self.bbox_emb(table_idxs)
-            # path_bbox_feature = path_bbox_feature.reshape(n_rays, -1)
-            # path_bbox_feature = interpolate_bbox_features(path_inp, path_bbox_feature)
-
-            bbox_features[i] = path_bbox_feature
-
-        bbox_features = torch.cat(bbox_features, dim=1)
-
-        return bbox_features
-        
         # n_rays = inp.shape[0]
         # n_points = inp.shape[1]
 
@@ -436,7 +402,7 @@ class HashMultiBBoxEncoder(nn.Module):
         # bbox_features = [torch.zeros((n_rays, self.enc_dim * n_points), device="cuda") for _ in range(self.enc_depth)]
         # max_depth = depth_l.max()
         # max_depth = min(max_depth, self.enc_depth)
-        
+
         # for i in range(max_depth):
         #     path_bbox_idxs = history_l[:, i]
         #     path_nodes_min = self.nodes_min[path_bbox_idxs]
@@ -445,26 +411,118 @@ class HashMultiBBoxEncoder(nn.Module):
         #     path_inp = path_inp.clamp(0, 1)
 
         #     inp_packed = path_inp.reshape(-1, 3)
-        #     a = path_bbox_idxs[:, None].expand(-1, n_points).flatten()
-        #     x = (inp_packed - 0.5) * self.scales(a) * 0.1 + self.offsets(a)
-        #     y = torch.cat([(inp_packed - 0.5), self.bbox_featuers(a)], dim=-1)
-        #     # y = torch.cat([self.hashgrid2(inp_packed), self.bbox_featuers(a)], dim=-1)
-        #     y = self.transform(y)
-        #     path_bbox_feature = self.hashgrid(y).float()
-        #     # path_bbox_feature = self.encode_bbox(inp_packed, path_bbox_idxs[:, None].expand(-1, n_points).flatten())
+        #     path_bbox_feature = self.encode_bbox(inp_packed, path_bbox_idxs[:, None].expand(-1, n_points).flatten())
         #     path_bbox_feature = path_bbox_feature.reshape(n_rays, -1)
+
+        #     # table_idxs = self.hash(path_bbox_idxs)            
+        #     # path_bbox_feature = self.bbox_emb(table_idxs)
+        #     # path_bbox_feature = path_bbox_feature.reshape(n_rays, -1)
+        #     # path_bbox_feature = interpolate_bbox_features(path_inp, path_bbox_feature)
 
         #     bbox_features[i] = path_bbox_feature
 
         # bbox_features = torch.cat(bbox_features, dim=1)
 
         # return bbox_features
+        
+        n_rays = inp.shape[0]
+        n_points = inp.shape[1]
+
+        depth = torch.zeros((n_rays,), dtype=torch.int).cuda()
+        history = torch.zeros((n_rays, 64), dtype=torch.uint32).cuda()
+        masks = torch.ones((n_rays,), dtype=torch.bool, device="cuda")
+        self.bvh.fill_history(masks, bbox_idxs, depth, history)
+        depth_l = depth.long()
+        history_l = history.long()
+
+        bbox_features = [torch.zeros((n_rays, self.enc_dim * n_points), device="cuda") for _ in range(self.enc_depth)]
+        max_depth = depth_l.max()
+        max_depth = min(max_depth, self.enc_depth)
+        
+        for i in range(max_depth):
+            path_bbox_idxs = history_l[:, i]
+            path_nodes_min = self.nodes_min[path_bbox_idxs]
+            extent = self.nodes_extent[path_bbox_idxs]
+            path_inp = (inp - path_nodes_min[:, None, :]) / extent[:, None, :]
+            path_inp = path_inp.clamp(0, 1)
+
+            inp_packed = path_inp.reshape(-1, 3)
+            a = path_bbox_idxs[:, None].expand(-1, n_points).flatten()
+            x = (inp_packed - 0.5) * self.scales(a) * 0.1 + self.offsets(a)
+            y = torch.cat([(inp_packed - 0.5), self.bbox_featuers(a)], dim=-1)
+            # y = torch.cat([self.hashgrid2(inp_packed), self.bbox_featuers(a)], dim=-1)
+            y = self.transform(y)
+            path_bbox_feature = self.hashgrid(y).float()
+            # path_bbox_feature = self.encode_bbox(inp_packed, path_bbox_idxs[:, None].expand(-1, n_points).flatten())
+            path_bbox_feature = path_bbox_feature.reshape(n_rays, -1)
+
+            bbox_features[i] = path_bbox_feature
+
+        bbox_features = torch.cat(bbox_features, dim=1)
+
+        # print(bbox_features.shape)
+
+        return bbox_features
     
     def out_dim(self):
-        return self.enc_dim * self.enc_depth# * 16
+        # return self.enc_dim * self.enc_depth * 16
+        return self.enc_dim * self.enc_depth * 16
     
     def get_num_parameters(self):
         return self.table_size * self.enc_dim
+
+
+class CodebookEncoder(nn.Module):
+    def __init__(self, cfg, enc_dim, enc_depth, full_depth, codebook_bitwidth):
+        super().__init__()
+
+        self.cfg = cfg
+        self.enc_dim = enc_dim
+        self.enc_depth = enc_depth
+        self.full_depth = full_depth
+        self.codebook_bitwidth = codebook_bitwidth
+
+        obj_path = self.cfg.mesh.path.replace(".fbx", ".obj")
+        self.octree = wisp.accelstructs.octree_as.OctreeAS.from_mesh(
+            # mesh_path="/home/me/brain/neural-intersection/lego2.obj",
+            mesh_path=obj_path,
+            level=self.full_depth,
+            # num_samples_on_mesh=100000000, # default
+            num_samples_on_mesh=80000000,
+        )
+        print("Occupancy:", self.octree.occupancy())
+        print("Capacity:", self.octree.capacity())
+
+        self.grid = wisp.models.grids.codebook_grid.CodebookOctreeGrid(
+            blas=self.octree,
+            feature_dim=self.enc_dim,
+            num_lods=self.full_depth,
+            codebook_bitwidth=self.codebook_bitwidth,
+        ).cuda()
+
+        # for i in self.grid.features:
+        #     nn.init.uniform_(i.data, a=-0.0001, b=0.0001)
+
+    def forward(self, inp):
+        # print(f"INP: {inp.shape}")
+        # print(inp.min().item(), inp.max().item())
+        a = self.grid.interpolate(
+            coords=inp,
+            lod_idx=self.enc_depth - 1,
+            # lod_idx=1,
+        )
+        # print(f"a: {a.shape}")
+        # exit()
+        a = a.reshape(a.shape[0], -1)
+        return a
+    
+    def out_dim(self):
+        return self.enc_dim * self.enc_depth
+    
+    def get_num_parameters(self):
+        indices = sum(self.octree.occupancy())
+        grid = (2 ** self.codebook_bitwidth) * self.enc_dim
+        return indices * ((self.codebook_bitwidth + 8) / 32) + grid
 
 
 class NBVHModel(nn.Module):
@@ -476,9 +534,14 @@ class NBVHModel(nn.Module):
         self.bvh_data = bvh_data
         self.n_points = n_points
         self.ts = torch.linspace(0, 1, self.n_points, device="cuda")
+        # self.ts = torch.linspace(0.25, 0.75, self.n_points, device="cuda")
 
         self.encoder = encoder
-        self.in_dim = self.n_points * self.encoder.out_dim()
+        # self.encoder2 = HashGridEncoder(cfg, dim=3, log2_hashmap_size=12, finest_resolution=256, bvh_data=bvh_data, bvh=bvh)
+        # self.encoder2 = HashGridEncoder(cfg, dim=3, log2_hashmap_size=18, base_resolution=8, finest_resolution=2 ** 8, n_features_per_level=4, bvh_data=bvh_data, bvh=bvh)
+        # self.encoder2 = HashBBoxEncoder(cfg, table_size=2**13, enc_dim=16, enc_depth=2, total_depth=13, bvh_data=bvh_data, bvh=bvh)
+        # self.encoder2 = HashMultiBBoxEncoder(cfg, table_size=1, enc_dim=2, enc_depth=10, total_depth=13, bvh_data=bvh_data, bvh=bvh)
+        self.in_dim = (self.n_points) * (self.encoder.out_dim())# + self.encoder2.out_dim())
         self.inner_dim = inner_dim
         self.out_dim = 5
         self.n_layers = n_layers
@@ -498,32 +561,123 @@ class NBVHModel(nn.Module):
 
         self.days = 0
 
-    def net_forward(self, orig, end, bbox_idxs, initial=False):
-        orig = orig.clone()
+        # self.norm_emb = nn.Embedding(self.bvh_data.n_nodes, 3, device='cuda')
+
+    def net_forward(self, orig, end, bbox_idxs, initial=False, true_depth=None):
+        with torch.no_grad():
+            orig = orig.clone()
         # orig.requires_grad = True
+        length = torch.norm(end - orig, dim=1)        
+
+        orig_offset = torch.zeros((orig.shape[0],), dtype=torch.float32).cuda()
+
+        fallback = 1
+
+        if type(self.encoder) == CodebookEncoder:
+            dirs = (end - orig)
+            norm = torch.norm(dirs, dim=-1, keepdim=False)
+            # norm[norm == 0] = 1
+            # dirs = dirs / norm
+            dirs[norm == 0, :] = 1
+            dirs = dirs / torch.norm(dirs, dim=-1, keepdim=True)
+
+            def get_first_idx(x):
+                unique, idx, counts = torch.unique(x, sorted=True, return_inverse=True, return_counts=True)
+                _, ind_sorted = torch.sort(idx, stable=True)
+                cum_sum = counts.cumsum(0)
+                cum_sum = torch.cat((torch.tensor([0]).cuda(), cum_sum[:-1]))
+                first_indicies = ind_sorted[cum_sum]
+                return first_indicies
+
+            # ==== fix orig ==== #
+            a = wisp.core.Rays(origins=orig - fallback * dirs, dirs=dirs)
+            b = self.encoder.octree.raytrace(a, with_exit=True)
+            ridx, pidx, depth = b.ridx, b.pidx, b.depth - fallback
+
+            if len(ridx) > 0:
+                m = depth[:, 1] > 0
+                if m.sum() > 0:
+                    ridx, pidx, depth = ridx[m], pidx[m], depth[m]
+
+                    first_idx = get_first_idx(ridx)
+                    ridx, pidx, depth = ridx[first_idx], pidx[first_idx], depth[first_idx]
+
+                    # orig_offset = depth.mean(dim=1)
+                    orig_offset = depth[:, 0] + 0.0001 * (depth[:, 1] - depth[:, 0])
+                    orig_offset = torch.zeros((orig.shape[0],), dtype=torch.float32).cuda().scatter_(0, ridx.long(), orig_offset)
+                    orig_offset[orig_offset > length] = 0
+
+                    # if true_depth is not None:
+                    #     for i in range(10):
+                    #         # m = ridx == i
+                    #         print(orig_offset[i], true_depth[i])
+                            # print(depth[m], true_depth[i])
+                    orig = orig + orig_offset[:, None] * dirs
+
+            # ==== fix end ==== #            
+            a = wisp.core.Rays(origins=end + fallback * dirs, dirs=-dirs)
+            b = self.encoder.octree.raytrace(a, with_exit=True)
+            ridx, pidx, depth = b.ridx, b.pidx, b.depth - fallback
+
+            if len(ridx) > 0:
+                m = depth[:, 1] > 0
+                if m.sum() > 0:                    
+                    ridx, pidx, depth = ridx[m], pidx[m], depth[m]
+
+                    first_idx = get_first_idx(ridx)
+                    ridx, pidx, depth = ridx[first_idx], pidx[first_idx], depth[first_idx]
+
+                    # end_offset = depth.mean(dim=1)
+                    end_offset = depth[:, 1] + 0.0001 * (depth[:, 1] - depth[:, 0])
+                    end_offset = torch.zeros((orig.shape[0],), dtype=torch.float32).cuda().scatter_(0, ridx.long(), end_offset)
+                    end_offset[end_offset > length] = 0
+
+                    end = end - end_offset[:, None] * dirs
+        
+        # orig_offset = torch.zeros((orig.shape[0],), dtype=torch.float32).cuda()
+
         inp = orig[..., None, :] + (end - orig)[..., None, :] * self.ts[None, :, None]
+
+        dir = (end - orig)
+        dir[dir == 0] = 1
+        dir = dir / torch.norm(dir, dim=-1, keepdim=True)
 
         if type(self.encoder) == HashGridEncoder:
             bbox_features = self.encoder(inp)
         elif type(self.encoder) in [BBoxEncoder, HashBBoxEncoder, HashMultiBBoxEncoder]:
             bbox_features = self.encoder(inp, bbox_idxs)
+        elif type(self.encoder) == CodebookEncoder:
+            bbox_features = self.encoder(inp)
         else:
             raise NotImplementedError
+
+        # if type(self.encoder2) == HashGridEncoder:
+        #     bbox_features2 = self.encoder2(inp)
+        # elif type(self.encoder2) in [BBoxEncoder, HashBBoxEncoder, HashMultiBBoxEncoder]:
+        #     bbox_features2 = self.encoder2(inp, bbox_idxs)
+        # elif type(self.encoder2) == CodebookEncoder:
+        #     bbox_features2 = self.encoder2(inp)
+        # else:
+        #     raise NotImplementedError        
+        # bbox_features = torch.cat([bbox_features, bbox_features2], dim=-1)
 
         a = self.mlp(bbox_features).float()
 
         pred_cls = a[:, 0]
         pred_dist = a[:, 1]
         pred_normal = a[:, 2:5]
-        lengths = torch.norm(end - orig, dim=1) * 0 + 1
-        pred_dist = pred_dist * lengths
 
         # pred_normal = torch.autograd.grad(pred_dist, orig, grad_outputs=torch.ones_like(pred_dist), create_graph=True)[0]
+        # pred_normal = -dir + pred_normal
+        # norm_emb = self.norm_emb(bbox_idxs.long())
+        # pred_normal = pred_normal + norm_emb
 
         if initial:
             pred_cls.fill_(100)
             pred_dist.fill_(0)
             pred_normal.fill_(1)
+
+        pred_dist = pred_dist + orig_offset
 
         pred_normal[torch.norm(pred_normal, dim=-1) < 1e-6, :] = 1
         pred_normal = pred_normal / torch.norm(pred_normal, dim=-1, keepdim=True)
@@ -537,37 +691,6 @@ class NBVHModel(nn.Module):
         hit_mask = batch.mask
         dist = batch.t
         normals = batch.normals
-        length = torch.norm(end - orig, dim=1) * 0 + 1
-        dist_normed = dist * length
-
-        # if bar is not None:
-        #     bar.set_description(f"{orig.shape[0]}; {hit_mask.sum().item()}; {orig.shape[0] - hit_mask.sum().item()} ({hit_mask.sum().item() / orig.shape[0] * 100:.2f}%)")
-
-        # print(f"Total rays: {orig.shape[0]}; Hit: {hit_mask.sum().item()}; Miss: {orig.shape[0] - hit_mask.sum().item()} ({hit_mask.sum().item() / orig.shape[0] * 100:.2f}%)")
-        # self.days += 1
-        # if self.days > 10:
-        #     exit()
-
-        # print(hit_mask.float().mean().item())
-
-        # print(orig.shape)
-
-        # m = (batch.normals * (end - orig)).sum(dim=-1) > 0
-        # m = (dist > 1.001) | (dist < -0.001) & hit_mask
-        m = (dist < -0.001) & hit_mask
-        # m = (dist > 1.0) & hit_mask
-
-        # print(dist[hit_mask].mean())
-
-        # batch.normals[m, :] *= -1
-
-        # if bbox_idxs.long().min() < 0 or bbox_idxs.long().max() > 10:
-        #     print(hit_mask.sum(), orig.shape)
-        #     print(bbox_idxs.long().min(), bbox_idxs.long().max())
-            # print(bbox_idxs.long()[hit_mask])
-
-        # if m[hit_mask].sum().item() > 0:
-        #     print(123)
 
         n_rays = orig.shape[0]
         depth = torch.zeros((n_rays,), dtype=torch.int).cuda()
@@ -575,52 +698,19 @@ class NBVHModel(nn.Module):
         masks = torch.ones((n_rays,), dtype=torch.bool, device="cuda")
         self.bvh.fill_history(masks, bbox_idxs, depth, history)
 
-        # print(bbox_idxs.long().min(), bbox_idxs.long().max())
-
-        # print(orig[0])
-        # print(end[0])
-        # print((end - orig)[0])
-        # print(batch.normals[0])
-        # print(batch.t[0])
-        # print(batch.bbox_idxs.long()[0])
-        # print(f"History: {history.long()[0, :depth.long()[0].max()]}")
-
-        # print(dist[hit_mask].max().item(), dist[hit_mask].min().item(), dist[hit_mask].mean().item())
-
-        if m[hit_mask].sum().item() > 0:
-            print(f"Warning: tmax = {dist[hit_mask].max().item():.5f}, tmin = {dist[hit_mask].min().item():.5f} ({m[hit_mask].sum().item()})")
-
-        # if m[hit_mask].sum().item() > 0:
-        #     print(m[hit_mask].sum().item(), (~m)[hit_mask].sum().item())
-        #     print(bbox_idxs.long().min(), bbox_idxs.long().max())
-        #     print(f"Depth: {depth[m]}")
-        #     print(f"Bbox: {bbox_idxs.long()[m]}")
-        #     print(orig[m])
-        #     print(end[m])
-        #     print((end - orig)[m])
-        #     print(batch.normals[m])
-        #     print(batch.t[m])
-        #     print(batch.bbox_idxs.long()[m])
-        #     print(f"History: {history.long()[m, :depth.long()[m].max()]}")
-
-        # if m[hit_mask].sum().item() > 0:
-        #     exit()
-
-        
-        pred_cls, pred_dist, pred_normal = self.net_forward(orig, end, bbox_idxs, initial=False)
+        pred_cls, pred_dist, pred_normal = self.net_forward(orig, end, bbox_idxs, initial=False, true_depth=dist)
         
         # print(dist[hit_mask].max().item(), dist[hit_mask].min().item())
         # cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float()) * 10 #, weight=hit_mask.float() * 0.9 + 0.1)
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float(), weight=hit_mask.float() * 0 + 1)
-        mse_loss = F.mse_loss((pred_dist * length)[hit_mask], (dist * length)[hit_mask])
+        # mse_loss = F.mse_loss((pred_dist * length)[hit_mask], (dist * length)[hit_mask])
+        mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask])
         norm_mse_loss = F.mse_loss(pred_normal[hit_mask], batch.normals[hit_mask])
         # norm_mse_loss = F.l1_loss(pred_normal[hit_mask], batch.normals[hit_mask])
 
         acc = ((pred_cls > 0) == hit_mask).float().mean().item()
 
-        loss = cls_loss * 2 + mse_loss + norm_mse_loss
-        # if acc > 0.80:
-        #     loss = cls_loss + norm_mse_loss * 10
+        loss = cls_loss + mse_loss + norm_mse_loss #* 10
         # loss = cls_loss
 
         return loss, acc, mse_loss, norm_mse_loss
@@ -634,6 +724,33 @@ class NBVHModel(nn.Module):
         vec = batch.ray_vectors
 
         n_rays = orig.shape[0]
+
+        ###
+
+        # def get_first_idx(x):
+        #         unique, idx, counts = torch.unique(x, sorted=True, return_inverse=True, return_counts=True)
+        #         _, ind_sorted = torch.sort(idx, stable=True)
+        #         cum_sum = counts.cumsum(0)
+        #         cum_sum = torch.cat((torch.tensor([0]).cuda(), cum_sum[:-1]))
+        #         first_indicies = ind_sorted[cum_sum]
+        #         return first_indicies
+
+        # a = wisp.core.Rays(origins=orig, dirs=vec)
+        # b = self.encoder.octree.raytrace(a, with_exit=True)
+        # ridx, pidx, depth = b.ridx, b.pidx, b.depth
+
+        # if len(ridx) > 0:
+        #     first_idx = get_first_idx(ridx)
+        #     ridx, pidx, depth = ridx[first_idx], pidx[first_idx], depth[first_idx]
+        #     pred = torch.zeros((orig.shape[0],), dtype=torch.float32).cuda().scatter_(0, ridx.long(), depth.mean(dim=1))
+        # else:
+        #     pred = torch.zeros((orig.shape[0],), dtype=torch.float32).cuda()
+
+        # self.acc_denom += 1
+
+        # return pred != 0, pred, torch.zeros((orig.shape[0], 3), dtype=torch.float32).cuda()
+
+        ###
 
         dist = torch.ones((n_rays,), dtype=torch.float32).cuda() * 1e9
         normals = torch.zeros((n_rays, 3), dtype=torch.float32, device="cuda")
@@ -660,7 +777,7 @@ class NBVHModel(nn.Module):
             pred_cls_c, pred_dist_c, pred_normal_c = self.net_forward(inp_orig[cur_mask], inp_end[cur_mask], cur_bbox_idxs.long()[cur_mask].to(torch.uint32), initial=initial)
 
             pred_cls = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, pred_cls_c)
-            pred_dist = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, pred_dist_c) * 0 + cur_t1
+            pred_dist = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, pred_dist_c) + cur_t1
             pred_normals = torch.zeros((n_rays, 3), device="cuda").masked_scatter_(cur_mask[:, None].expand(-1, 3), pred_normal_c)
 
             if true_dist is not None:
