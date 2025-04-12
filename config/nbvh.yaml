@@ -1,15 +1,28 @@
 mode: nbvh
-log_dir: runsx
+log_dir: comp1
 
 mesh:
   # path: "lego_decimated.stl"
-  path: "suzanne.fbx"
+  # path: "datasets/lego_mesh/Lego_856_Bulldozer.fbx"
+  # path: "lego2.fbx"
+  path: "lego2.obj"
+  # path: "portalgun.obj"
+  # path: "suzanne.fbx"
+  # path: "suzanne_smooth.obj"
+  # path: "suzanne_supersmooth.obj"
+  # path: "4090.obj"
+  # path: "plane.fbx"
+  # path: "cube.fbx"
   split_faces: 0.8
   bvh_depth: 15
 
 train:
-  lr: 0.001
-  total_size: 100000000
+  lr: 0.003
+  # total_size: 10000000
+  # batch_size: 40000
+  # total_size: 2000000000
+  # batch_size: 1000000
+  total_size: 200000000
   batch_size: 100000
 
 val:
@@ -18,4 +31,4 @@ val:
 
 cam:
   img_size: 800
-  batch_size: 160000
+  batch_size: 40000
