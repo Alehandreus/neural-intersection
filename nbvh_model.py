@@ -556,8 +556,6 @@ class NBVHModel(nn.Module):
 
         self.days = 0
 
-        # self.norm_emb = nn.Embedding(self.bvh_data.n_nodes, 3, device='cuda')
-
     def net_forward(self, orig, end, bbox_idxs, initial=False, true_depth=None):
         with torch.no_grad():
             orig = orig.clone()
@@ -597,7 +595,6 @@ class NBVHModel(nn.Module):
                     first_idx = get_first_idx(ridx)
                     ridx, pidx, depth = ridx[first_idx], pidx[first_idx], depth[first_idx]
 
-                    # orig_offset = depth.mean(dim=1)
                     orig_offset = depth[:, 0] + 0.0001 * (depth[:, 1] - depth[:, 0])
                     orig_offset = torch.zeros((orig.shape[0],), dtype=torch.float32).cuda().scatter_(0, ridx.long(), orig_offset)
                     orig_offset[orig_offset > length] = 0
@@ -617,7 +614,6 @@ class NBVHModel(nn.Module):
                     first_idx = get_first_idx(ridx)
                     ridx, pidx, depth = ridx[first_idx], pidx[first_idx], depth[first_idx]
 
-                    # end_offset = depth.mean(dim=1)
                     end_offset = depth[:, 1] + 0.0001 * (depth[:, 1] - depth[:, 0])
                     end_offset = torch.zeros((orig.shape[0],), dtype=torch.float32).cuda().scatter_(0, ridx.long(), end_offset)
                     end_offset[end_offset > length] = 0
@@ -679,10 +675,9 @@ class NBVHModel(nn.Module):
         
         # cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float()) * 10 #, weight=hit_mask.float() * 0.9 + 0.1)
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float(), weight=hit_mask.float() * 0 + 1)
-        # mse_loss = F.mse_loss((pred_dist * length)[hit_mask], (dist * length)[hit_mask])
         mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask])
-        norm_mse_loss = F.mse_loss(pred_normal[hit_mask], batch.normals[hit_mask])
-        # norm_mse_loss = F.l1_loss(pred_normal[hit_mask], batch.normals[hit_mask])
+        norm_mse_loss = F.mse_loss(pred_normal[hit_mask], normals[hit_mask])
+        # norm_mse_loss = F.l1_loss(pred_normal[hit_mask], normals[hit_mask])
 
         acc = ((pred_cls > 0) == hit_mask).float().mean().item()
 
