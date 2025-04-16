@@ -30,14 +30,7 @@ class Trainer:
     def set_model(self, model, name="run"):
         self.model = model
         self.name = name
-        lr = self.cfg.train.lr
         self.optimizer = torch.optim.Adam(model.parameters(), lr=self.cfg.train.lr)
-        # self.scaler = torch.amp.GradScaler('cuda')
-        # self.optimizer = torch.optim.Adam([
-        #     {'params': model.mlp.parameters(), 'lr': lr},
-        #     {'params': model.encoder.grid.features.parameters(), 'lr': lr},
-        #     {'params': model.encoder.grid.dictionary.parameters(), 'lr': lr * 100},
-        # ], lr=lr)
 
         self.alpha = 0.99
         self.logger_loss = MetricLogger(self.alpha)
