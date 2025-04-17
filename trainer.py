@@ -118,8 +118,6 @@ class Trainer:
         img_normal_pred = torch.zeros((self.img_size * self.img_size, 3), device="cuda")
         img_normal = torch.zeros((self.img_size * self.img_size, 3), device="cuda")
 
-        self.model.reset_acc()
-
         bar = tqdm(range(self.ds_cam.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_cam.get_batch(batch_idx)
@@ -134,8 +132,6 @@ class Trainer:
             img_dist[batch_idx * batch_size : (batch_idx + 1) * batch_size] = batch.t[:, None]
             img_normal_pred[batch_idx * batch_size : (batch_idx + 1) * batch_size] = normal_pred
             img_normal[batch_idx * batch_size : (batch_idx + 1) * batch_size] = batch.normals
-        
-        print(f"Cam acc: {self.model.acc_nom / self.model.acc_denom:.4f}")
 
         img_dist = img_dist.reshape(1, self.img_size, self.img_size, 1)
         img_mask_pred = img_mask_pred.reshape(1, self.img_size, self.img_size, 1)
@@ -150,8 +146,8 @@ class Trainer:
         colors = torch.sum(img_normal * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
         colors_pred = torch.sum(img_normal_pred * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
 
-        # colors = (img_dist > 0).float()
-        # colors_pred = (img_dist_pred > 0).float()
+        colors = (img_dist > 0).float()
+        colors_pred = (img_dist_pred > 0).float()
 
         # colors = img_dist
         # colors_pred = img_dist_pred

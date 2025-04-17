@@ -69,7 +69,7 @@ def main(cfg):
     torch.set_float32_matmul_precision("high")
 
     mesh = Mesh(cfg.mesh.path)
-    mesh.split_faces(0.5)
+    # mesh.split_faces(0.5)
     builder = CPUBuilder(mesh)
     bvh_data = builder.build_bvh(cfg.mesh.bvh_depth)
     bvh_data.save_as_obj("bvh.obj", 13)
@@ -82,7 +82,7 @@ def main(cfg):
     # save_rays_blender(bvh_data, bvh, 100000)
     # exit()
 
-    nbvh_depth = 1
+    nbvh_depth = 13
     # bvh.grow_nbvh(2)
     # bvh.grow_nbvh(10)
     bvh.grow_nbvh(nbvh_depth - 1)
@@ -92,17 +92,18 @@ def main(cfg):
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=12, n_levels=8, finest_resolution=256, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=21, finest_resolution=512, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=18, base_resolution=8, n_levels=8, finest_resolution=2 ** 8, n_features_per_level=4, bvh_data=bvh_data, bvh=bvh)
+    encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=16, base_resolution=8, n_levels=8, finest_resolution=2 ** 8, n_features_per_level=4, bvh_data=bvh_data, bvh=bvh)
     # encoder = BBoxEncoder(cfg, enc_dim=2, enc_depth=8, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashBBoxEncoder(cfg, table_size=2**18, enc_dim=8, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashMultiBBoxEncoder(cfg, table_size=2**11 * 3, enc_dim=24, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashMultiBBoxEncoder(cfg, table_size=2**20, enc_dim=4, enc_depth=8, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
-    encoder = CodebookEncoder(cfg, enc_dim=16, enc_depth=4, full_depth=9, codebook_bitwidth=8)
-# 
+    # encoder = CodebookEncoder(cfg, enc_dim=16, enc_depth=4, full_depth=9, codebook_bitwidth=8)
+
     model = NBVHModel(
         cfg=cfg,
         n_layers=4,
         inner_dim=64,
-        n_points=4,
+        n_points=16,
         encoder=encoder,
         bvh_data=bvh_data,
         bvh=bvh,
