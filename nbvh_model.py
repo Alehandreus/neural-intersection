@@ -813,15 +813,11 @@ class NBVHModel2(nn.Module):
         a = self.mlp(bbox_features2)
         b = self.cls_mlp(bbox_features)
 
-        # pred_cls = self.cls_head(a).squeeze(-1)
-        # pred_dist = self.dist_head(a).squeeze(-1)
-        # pred_normal = self.normal_head(a)
-        # pred_cls_global = self.global_cls_head(a).squeeze(-1)
         pred_cls = a[:, :, 0]
         pred_dist = a[:, :, 1].clamp(0, 1)
         pred_normal = a[:, :, 2:5]
-        # pred_cls_global = a[:, :, 5].mean(dim=-1)
-        pred_cls_global = b[:, 0]
+        pred_cls_global = a[:, :, 5].mean(dim=-1)
+        # pred_cls_global = b[:, 0]
 
         if raw:
             return pred_cls, pred_dist, pred_normal, pred_cls_global
@@ -862,28 +858,13 @@ class NBVHModel2(nn.Module):
 
         lengths = torch.norm(end - orig, dim=1)
         dist_per_segment = lengths / (self.n_points - 1)
-        dist_segment_pred = pred_cls.argmax(dim=1)
-
-        # for i in range(len(orig)):
-        #     if dist[i] == 0: continue
-        #     print(dist[i], lengths[i])
-
-        # print(lengths)
-        # print(dist, dist_per_segment)
 
         true_segment = (dist / dist_per_segment).long()
         true_segment[true_segment >= self.n_points - 1] = self.n_points - 2
         true_segment[true_segment < 0] = 0
 
         mask = ((pred_cls - pred_cls.max(dim=1, keepdim=True).values) >= 0).float()
-        # print(true_segment)
         true_mask = torch.zeros_like(mask).scatter_(dim=1, index=true_segment[:, None], src=torch.ones_like(mask))
-        # print(true_mask)
-        # print(mask.shape, true_mask.shape)
-
-        # print(true_segment.mean(), pred_cls.mean())
-
-        # print(true_segment.float().mean())
 
         segment_cls_loss = F.binary_cross_entropy_with_logits(pred_cls, true_mask)
 
@@ -898,8 +879,7 @@ class NBVHModel2(nn.Module):
 
         acc = ((pred_cls_global > 0) == hit_mask).float().mean().item()
 
-        loss = cls_loss + mse_loss + norm_mse_loss# + segment_cls_loss
-        # loss = cls_loss
+        loss = cls_loss + mse_loss + norm_mse_loss + segment_cls_loss
 
         return loss, acc, mse_loss, norm_mse_loss
 
