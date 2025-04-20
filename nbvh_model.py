@@ -756,19 +756,6 @@ class NBVHModel2(nn.Module):
         self.inner_dim = inner_dim
         self.out_dim = 6
         self.n_layers = n_layers
-        self.cls_mlp = nn.Sequential(
-            nn.Linear(self.n_points * self.in_dim // 2, self.inner_dim),
-            nn.ReLU(),
-            nn.Linear(self.inner_dim, self.inner_dim),
-            nn.ReLU(),
-            nn.Linear(self.inner_dim, self.inner_dim),
-            nn.ReLU(),
-            nn.Linear(self.inner_dim, self.inner_dim),
-            nn.ReLU(),
-            nn.Linear(self.inner_dim, self.inner_dim),
-            nn.ReLU(),
-            nn.Linear(self.inner_dim, 1),
-        ).cuda()
         self.mlp = nn.Sequential(
             nn.Linear(self.in_dim, self.inner_dim),
             nn.ReLU(),
@@ -803,7 +790,7 @@ class NBVHModel2(nn.Module):
             bbox_features = self.encoder(inp)
         else:
             raise NotImplementedError
-        
+
         bbox_features2 = bbox_features.reshape((inp.shape[0], inp.shape[1], -1))
         bbox_features2 = torch.cat([
             bbox_features2[:, 1:, :],
@@ -811,13 +798,11 @@ class NBVHModel2(nn.Module):
         ], dim=-1)
 
         a = self.mlp(bbox_features2)
-        b = self.cls_mlp(bbox_features)
 
         pred_cls = a[:, :, 0]
         pred_dist = a[:, :, 1].clamp(0, 1)
         pred_normal = a[:, :, 2:5]
         pred_cls_global = a[:, :, 5].mean(dim=-1)
-        # pred_cls_global = b[:, 0]
 
         if raw:
             return pred_cls, pred_dist, pred_normal, pred_cls_global
