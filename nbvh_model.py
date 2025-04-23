@@ -541,19 +541,19 @@ class NBVHModel(nn.Module):
         self.inner_dim = inner_dim
         self.out_dim = 5
         self.n_layers = n_layers
-        self.mlp = nn.Sequential(
+        self.mlp = [
             nn.Linear(self.in_dim, self.inner_dim),
             nn.ReLU(),
-            nn.Linear(self.inner_dim, self.inner_dim),
-            nn.ReLU(),
-            nn.Linear(self.inner_dim, self.inner_dim),
-            nn.ReLU(),
-            nn.Linear(self.inner_dim, self.inner_dim),
-            nn.ReLU(),
-            nn.Linear(self.inner_dim, self.inner_dim),
-            nn.ReLU(),
+        ]
+        for i in range(self.n_layers - 2):
+            self.mlp += [
+                nn.Linear(self.inner_dim, self.inner_dim),
+                nn.ReLU(),
+            ]
+        self.mlp += [
             nn.Linear(self.inner_dim, self.out_dim),
-        ).cuda()
+        ]
+        self.mlp = nn.Sequential(*self.mlp).cuda()
 
         self.days = 0
 
