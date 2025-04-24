@@ -769,6 +769,19 @@ class NBVHModel2(nn.Module):
             nn.ReLU(),
             nn.Linear(self.inner_dim, self.out_dim),
         ).cuda()
+        self.mlp2 = nn.Sequential(
+            nn.Linear(self.encoder.out_dim() * self.n_points, self.inner_dim),
+            nn.ReLU(),
+            nn.Linear(self.inner_dim, self.inner_dim),
+            nn.ReLU(),
+            nn.Linear(self.inner_dim, self.inner_dim),
+            nn.ReLU(),
+            nn.Linear(self.inner_dim, self.inner_dim),
+            nn.ReLU(),
+            nn.Linear(self.inner_dim, self.inner_dim),
+            nn.ReLU(),
+            nn.Linear(self.inner_dim, 3),
+        ).cuda()
         self.global_cls_head = nn.Sequential(
             MeanPooling(),
             nn.Linear(self.inner_dim, 1),
@@ -780,6 +793,11 @@ class NBVHModel2(nn.Module):
         self.days = 0
 
     def net_forward(self, orig, end, bbox_idxs, initial=False, true_depth=None, raw=False):
+        dirs = end - orig
+        norms = torch.norm(dirs, keepdim=True)
+        norms[norms == 0] = 1
+        dirs /= norms
+
         inp = orig[..., None, :] + (end - orig)[..., None, :] * self.ts[None, :, None]
 
         if type(self.encoder) == HashGridEncoder:
@@ -802,6 +820,8 @@ class NBVHModel2(nn.Module):
         pred_cls = a[:, :, 0]
         pred_dist = a[:, :, 1].clamp(0, 1)
         pred_normal = a[:, :, 2:5]
+        # pred_normal = pred_normal + self.mlp2(bbox_features).unsqueeze(1)
+        # pred_normal = pred_normal + dirs.unsqueeze(1)
         pred_cls_global = a[:, :, 5].mean(dim=-1)
 
         if raw:
@@ -810,7 +830,8 @@ class NBVHModel2(nn.Module):
         lengths = torch.norm(end - orig, dim=1)
         dist_per_segment = lengths / (self.n_points - 1)
         dist_segment_pred = pred_cls.argmax(dim=1)
-        mask = ((pred_cls - pred_cls.max(dim=1, keepdim=True).values) >= 0).float()
+        # mask = ((pred_cls - pred_cls.max(dim=1, keepdim=True).values) >= 0).float()
+        mask = F.softmax(pred_cls, dim=-1)
 
         dist = (pred_dist * mask).sum(dim=1) * dist_per_segment + dist_segment_pred * dist_per_segment
         normal = (pred_normal * mask[:, :, None]).sum(dim=1)
@@ -820,8 +841,11 @@ class NBVHModel2(nn.Module):
             dist.fill_(0)
             normal.fill_(1)
         
-        normal[torch.norm(normal, dim=-1) < 1e-6, :] = 1
-        normal = normal / torch.norm(normal, dim=-1, keepdim=True)
+        normal_norm = torch.norm(normal, dim=-1, keepdim=True)
+        normal_norm[normal_norm == 0] = 1
+        normal = normal / normal_norm
+        # normal[torch.norm(normal, dim=-1) < 1e-6, :] = 1
+        # normal = normal / torch.norm(normal, dim=-1, keepdim=True)
 
         return pred_cls_global, dist, normal
 
@@ -848,16 +872,22 @@ class NBVHModel2(nn.Module):
         true_segment[true_segment >= self.n_points - 1] = self.n_points - 2
         true_segment[true_segment < 0] = 0
 
-        mask = ((pred_cls - pred_cls.max(dim=1, keepdim=True).values) >= 0).float()
+        # mask = ((pred_cls - pred_cls.max(dim=1, keepdim=True).values) >= 0).float()
+        mask = F.softmax(pred_cls, dim=-1)
         true_mask = torch.zeros_like(mask).scatter_(dim=1, index=true_segment[:, None], src=torch.ones_like(mask))
 
         segment_cls_loss = F.binary_cross_entropy_with_logits(pred_cls, true_mask)
 
         pred_dist = (pred_dist * true_mask).sum(dim=1) * dist_per_segment + true_segment * dist_per_segment
-        pred_normal = (pred_normal * true_mask[:, :, None]).sum(dim=1)
+        # pred_normal = (pred_normal * true_mask[:, :, None]).sum(dim=1)
+        pred_normal = (pred_normal * mask[:, :, None]).sum(dim=1)
+
+        normal_norm = torch.norm(pred_normal, dim=-1, keepdim=True)
+        normal_norm = normal_norm * (normal_norm > 0) + (normal_norm == 0)
+        pred_normal = pred_normal / normal_norm
 
         # cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float()) * 10 #, weight=hit_mask.float() * 0.9 + 0.1)
-        cls_loss = F.binary_cross_entropy_with_logits(pred_cls_global, hit_mask.float(), weight=hit_mask.float() * 0 + 1)
+        cls_loss = F.binary_cross_entropy_with_logits(pred_cls_global, hit_mask.float(), weight=hit_mask.float() * 1 + 1)
         mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask])
         norm_mse_loss = F.mse_loss(pred_normal[hit_mask], normals[hit_mask])
         # norm_mse_loss = F.l1_loss(pred_normal[hit_mask], normals[hit_mask])

@@ -139,18 +139,27 @@ class Trainer:
         img_normal_pred = img_normal_pred.reshape(1, self.img_size, self.img_size, 3)
         img_normal = img_normal.reshape(1, self.img_size, self.img_size, 3)
 
+        max_dist = img_dist.max() + 0.001
+        img_dist_pred /= max_dist
+        img_dist /= max_dist
+
         # light_dir = torch.tensor([1.0, -1.0, 1.0], device="cuda")
         light_dir = torch.tensor([1.0, -2.0, 1.5], device="cuda")
         light_dir /= torch.norm(light_dir)
 
-        colors = torch.sum(img_normal * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
+        colors = torch.sum(img_normal * light_dir[None, None, None, :], dim=-1, keepdim=True)# * 0.5 + 0.5
+        colors[colors < 0] = -colors[colors < 0]
+        colors = colors * 0.5 + 0.5
         colors_pred = torch.sum(img_normal_pred * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
+        colors_pred[colors_pred < 0.5] = 0.5
 
-        colors = (img_dist > 0).float()
-        colors_pred = (img_dist_pred > 0).float()
+        # colors = (img_dist > 0).float()
+        # colors_pred = (img_dist_pred > 0).float()        
 
         # colors = img_dist
         # colors_pred = img_dist_pred
+
+        # colors_pred = (colors_pred > 0).float()
 
         colors[img_dist == 0] = 0
         colors_pred[img_mask_pred == 0] = 0
@@ -180,30 +189,30 @@ class Trainer:
 
         self.writer.add_scalar("MSE/cam", mse.item(), self.n_steps)
 
-        # fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-        # ax[0].axis("off")
-        # ax[0].imshow(colors[0].cpu().numpy() ** 2, cmap="gray")
-        # ax[1].axis("off")
-        # ax[1].imshow(colors_pred[0].cpu().numpy() ** 2, cmap="gray")
-        # plt.tight_layout()
-        # plt.savefig("fig.png")
-        # plt.close()
-        # plt.clf()
+        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+        ax[0].axis("off")
+        ax[0].imshow(colors[0].cpu().numpy() ** 2, cmap="gray")
+        ax[1].axis("off")
+        ax[1].imshow(colors_pred[0].cpu().numpy() ** 2, cmap="gray")
+        plt.tight_layout()
+        plt.savefig("fig.png")
+        plt.close()
+        plt.clf()
 
-        # ##############################
+        ##############################
 
-        # colors = cut_edges(colors)
-        # colors_pred = cut_edges(colors_pred)
-        # mse_edge = F.mse_loss(colors, colors_pred).item()
+        colors = cut_edges(colors)
+        colors_pred = cut_edges(colors_pred)
+        mse_edge = F.mse_loss(colors, colors_pred).item()
 
-        # self.writer.add_scalar("MSE/cam_edge", mse_edge, self.n_steps)
+        self.writer.add_scalar("MSE/cam_edge", mse_edge, self.n_steps)
 
-        # fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-        # ax[0].axis("off")
-        # ax[0].imshow(colors[0].cpu().numpy() ** 2, cmap="gray")
-        # ax[1].axis("off")
-        # ax[1].imshow(colors_pred[0].cpu().numpy() ** 2, cmap="gray")
-        # plt.tight_layout()
-        # plt.savefig("fig_edge.png")
-        # plt.close()
-        # plt.clf()
+        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+        ax[0].axis("off")
+        ax[0].imshow(colors[0].cpu().numpy() ** 2, cmap="gray")
+        ax[1].axis("off")
+        ax[1].imshow(colors_pred[0].cpu().numpy() ** 2, cmap="gray")
+        plt.tight_layout()
+        plt.savefig("fig_edge.png")
+        plt.close()
+        plt.clf()

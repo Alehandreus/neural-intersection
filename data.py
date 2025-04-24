@@ -120,18 +120,6 @@ def generate_camera_rays(bvh, mesh_center, mesh_extent, img_size):
         batch_data.bbox_idxs[s:e] = local_batch_data.bbox_idxs[:cur_batch_size]
         batch_data.normals[s:e] = local_batch_data.normals[:cur_batch_size]
 
-    # bvh.traverse(
-    #     batch_data.ray_origins,
-    #     batch_data.ray_vectors,
-    #     batch_data.mask,
-    #     batch_data.t,
-    #     batch_data.t,
-    #     batch_data.bbox_idxs,
-    #     batch_data.normals,
-    #     TreeType.BVH,
-    #     TraverseMode.CLOSEST_PRIMITIVE,
-    # )
-
     return batch_data
 
 
@@ -195,7 +183,6 @@ class NBVHDataset(Dataset):
         return self.total_size
 
     def __getitem__(self, index):
-        assert self.mode in ["val", "cam"]
         return self.batch_data[index]
     
     def n_batches(self):
@@ -210,11 +197,9 @@ class NBVHDataset(Dataset):
         if self.mode in ["val", "cam"]:
             s = index * self.batch_size
             e = s + self.batch_size
-            # print(self.batch_data.normals[self.batch_data.mask].mean())
             return self.batch_data.get_slice(s, e)
 
         n_generated = self.fill_batch_data()
         batch = self.batch_data.get_compacted(n_generated)
-        # print(batch.normals[batch.mask].mean())
         
         return batch
