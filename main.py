@@ -82,7 +82,7 @@ def main(cfg):
     # save_rays_blender(bvh_data, bvh, 100000)
     # exit()
 
-    nbvh_depth = 13
+    nbvh_depth = 16
     # bvh.grow_nbvh(2)
     # bvh.grow_nbvh(10)
     bvh.grow_nbvh(nbvh_depth - 1)
@@ -98,19 +98,29 @@ def main(cfg):
     # encoder = HashBBoxEncoder(cfg, table_size=2**18, enc_dim=8, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashMultiBBoxEncoder(cfg, table_size=2**11 * 3, enc_dim=24, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashMultiBBoxEncoder(cfg, table_size=2**20, enc_dim=4, enc_depth=8, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
-    # encoder = CodebookEncoder(cfg, enc_dim=16, enc_depth=4, full_depth=9, codebook_bitwidth=8)
+    # encoder = CodebookEncoder(cfg, enc_dim=16, enc_depth=4, full/_depth=9, codebook_bitwidth=8)
 
-    model = NBVHModel2(
+    # model = NBVHModel2(
+    #     cfg=cfg,
+    #     n_layers=4,
+    #     inner_dim=64,
+    #     n_points=4,
+    #     encoder=encoder,
+    #     bvh_data=bvh_data,
+    #     bvh=bvh,
+    # )
+
+    model = NBVHModel(
         cfg=cfg,
         n_layers=4,
         inner_dim=64,
-        n_points=16,
+        n_points=4,
         encoder=encoder,
         bvh_data=bvh_data,
         bvh=bvh,
     )
 
-    name = "0"
+    name = "1"
     trainer.set_model(model, name)
     trainer.cam(initial=True)
     for i in range(100):
