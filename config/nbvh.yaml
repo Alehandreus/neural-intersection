@@ -4,12 +4,12 @@ log_dir: kmlp4
 mesh:
   # path: "lego_decimated.stl"
   # path: "datasets/lego_mesh/Lego_856_Bulldozer.fbx"
-  path: "lego2.fbx"
+  # path: "lego2.fbx"
   # path: "lego2.obj"
   # path: "portalgun.obj"
   # path: "suzanne.fbx"
   # path: "suzanne_smooth.obj"
-  # path: "suzanne_supersmooth.obj"
+  path: "suzanne_supersmooth.obj"
   # path: "4090.obj"
   # path: "plane.fbx"
   # path: "cube.fbx"
@@ -22,8 +22,8 @@ train:
   # batch_size: 4000
   # total_size: 2000000000
   # batch_size: 1000000
-  total_size: 320000000
-  batch_size: 400000
+  total_size: 160000000
+  batch_size: 200000
   # total_size: 800000000
   # batch_size: 400000
 
@@ -32,7 +32,7 @@ val:
   batch_size: 10000
 
 cam:
-  img_size: 2000
-  # img_size: 1000
+  img_size: 1000
+  # img_size: 2000
   # batch_size: 40000
-  batch_size: 1000000
+  batch_size: 10000

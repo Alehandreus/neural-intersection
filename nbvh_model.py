@@ -9,6 +9,7 @@ from bvh import Mesh, CPUBuilder, GPUTraverser
 from bvh import TreeType, TraverseMode
 
 from myutils.modules import MeanPooling
+from myutils.hashgrid import MultiResHashGrid
 from myutils.misc import *
 from myutils.ray import *
 
@@ -89,7 +90,15 @@ class HashGridEncoder(nn.Module):
             # 'finest_resolution': finest_resolution,
             "per_level_scale": b,
         }
-        self.enc = tcnn.Encoding(self.input_dim, config)
+        # self.enc = tcnn.Encoding(self.input_dim, config)
+        self.enc = MultiResHashGrid(
+            dim=dim,
+            n_levels=n_levels,
+            n_features_per_level=n_features_per_level,
+            log2_hashmap_size=log2_hashmap_size,
+            base_resolution=base_resolution,
+            finest_resolution=finest_resolution,
+        ).cuda()
 
     def forward(self, x):
         n_rays = x.shape[0]

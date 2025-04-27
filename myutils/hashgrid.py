@@ -7,6 +7,7 @@ import math
 import numpy as np
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 # --- my module ---
 
@@ -103,6 +104,133 @@ class _HashGrid(nn.Module):
         self.register_buffer("bin_mask", bin_mask, persistent=False)
 
     def forward(self, x: torch.Tensor):
+        # x: (b..., dim), torch.float32, range: [0, 1]
+        bdims = len(x.shape[:-1])
+        x = x * self.resolution
+        xi = x.long()
+        xf = x - xi.float().detach()
+        xi = xi.unsqueeze(dim=-2)  # (b..., 1, dim)
+        xf = xf.unsqueeze(dim=-2)  # (b..., 1, dim)
+        # to match the input batch shape
+        bin_mask = self.bin_mask.reshape(
+            (1,) * bdims + self.bin_mask.shape
+        )  # (1..., neig, dim)
+        # get neighbors' indices and weights on each dim
+        inds = torch.where(bin_mask, xi, xi + 1)  # (b..., neig, dim)
+        ws = torch.where(bin_mask, 1 - xf, xf)  # (b...., neig, dim)
+        # aggregate nehgibors' interp weights
+        w = ws.prod(dim=-1, keepdim=True)  # (b..., neig, 1)
+        # hash neighbors' id and look up table
+        hash_ids = fast_hash(inds, self.primes, self.hashmap_size)  # (b..., neig)
+        neig_data = self.embedding(hash_ids)  # (b..., neig, feat)
+        return torch.sum(neig_data * w, dim=-2)  # (b..., feat)
+    
+
+class _LearnableHashGrid(nn.Module):
+    def __init__(self, dim: int, n_features: int, feature_table_size: int, index_table_size: int, n_learnable_indices: int, resolution: float):
+        super().__init__()
+        self.dim = dim
+        self.n_features = n_features
+        self.feature_table_size = feature_table_size
+        self.index_table_size = index_table_size
+        self.n_learnable_indices = n_learnable_indices
+        self.resolution = resolution
+
+        # you can add more primes for supporting more dimensions
+        assert self.dim <= len(
+            PRIMES
+        ), f"HashGrid only supports < {len(PRIMES)}-D inputs"
+
+        self.feature_table = nn.Embedding(self.feature_table_size, self.n_features)
+        nn.init.uniform_(self.feature_table.weight, a=-0.0001, b=0.0001)
+
+        self.index_table = nn.Embedding(self.index_table_size, self.n_learnable_indices)
+        # nn.init.uniform_(self.index_table.weight, a=-0.0001, b=0.0001)
+
+        primes = torch.tensor(PRIMES, dtype=torch.int64)
+        self.register_buffer("primes", primes, persistent=False)
+
+        # create interpolation binary mask
+        n_neigs = 1 << self.dim
+        neigs = np.arange(n_neigs, dtype=np.int64).reshape((-1, 1))
+        dims = np.arange(self.dim, dtype=np.int64).reshape((1, -1))
+        bin_mask = torch.tensor(neigs & (1 << dims) == 0, dtype=bool)  # (neig, dim)
+        self.register_buffer("bin_mask", bin_mask, persistent=False)
+
+    def forward(self, x: torch.Tensor):
+
+        # x: (b..., dim), torch.float32, range: [0, 1]
+        bdims = len(x.shape[:-1])
+        x = x * self.resolution
+        xi = x.long()
+        xf = x - xi.float().detach()
+        xi = xi.unsqueeze(dim=-2)  # (b..., 1, dim)
+        xf = xf.unsqueeze(dim=-2)  # (b..., 1, dim)
+        # to match the input batch shape
+        bin_mask = self.bin_mask.reshape(
+            (1,) * bdims + self.bin_mask.shape
+        )  # (1..., neig, dim)
+        # get neighbors' indices and weights on each dim
+        inds = torch.where(bin_mask, xi, xi + 1)  # (b..., neig, dim)
+        ws = torch.where(bin_mask, 1 - xf, xf)  # (b...., neig, dim)
+        # aggregate nehgibors' interp weights
+        w = ws.prod(dim=-1, keepdim=True)  # (b..., neig, 1)
+        # hash neighbors' id and look up table
+        hash_ids = fast_hash(inds, self.primes, self.index_table_size)  # (b..., neig)
+
+        # hash_ids = hash_ids.flatten()
+        
+
+        # print(x.shape)
+        # print(hash_ids.shape)
+        feature_weights = self.index_table(hash_ids)
+        # print(feature_weights.shape)
+
+        a = torch.arange(0, self.n_learnable_indices, device=x.device)[None, None, :]
+        a = (a * PRIMES[1]) ^ (hash_ids[:, :, None] * PRIMES[2])
+        a = a % self.feature_table_size
+        # print(a.shape)
+
+        if self.training:
+
+            features = self.feature_table(a)
+            # print(features.shape)
+
+            feature_weights = F.softmax(feature_weights * 10, dim=-1)
+
+            features = (features * feature_weights[..., None]).sum(dim=-2)
+
+            # print(features.shape)
+
+            features = (features * w).sum(dim=-2)
+
+            # print(features.shape)
+
+            return features
+        
+        else:
+            b = feature_weights.argmax(dim=-1, keepdim=True)
+            a = torch.gather(a, dim=2, index=b)
+            a = a.squeeze(2)
+
+            # print(a.shape)            
+            
+            features = self.feature_table(a)
+            # print(features.shape)
+
+            # feature_weights = ((feature_weights - feature_weights.max(dim=2, keepdim=True).values) >= 0).float()
+            # features = (features * feature_weights[..., None]).sum(dim=-2)
+
+            features = (features * w).sum(dim=-2)
+
+            # print(features.shape)
+
+            return features
+
+        exit()
+
+        ######
+
         # x: (b..., dim), torch.float32, range: [0, 1]
         bdims = len(x.shape[:-1])
         x = x * self.resolution
@@ -234,25 +362,44 @@ class MultiResHashGrid(nn.Module):
             resolution = math.floor(base_resolution * (b**level_idx))
             hashmap_size = min(resolution**dim, 2**log2_hashmap_size)
             hashmap_size = 2**math.ceil(math.log2(hashmap_size))
-            if rank is None:
-                levels.append(
-                    _HashGrid(
-                        dim=dim,
-                        n_features=n_features_per_level,
-                        hashmap_size=hashmap_size,
-                        resolution=resolution,
-                    )
+            levels.append(
+                _LearnableHashGrid(
+                    dim=dim,
+                    n_features=n_features_per_level,
+                    feature_table_size=2 ** 16,
+                    index_table_size=2 ** 22,
+                    n_learnable_indices=32,
+                    resolution=resolution,
                 )
-            else:
-                levels.append(
-                    _HashGridLoRA(
-                        dim=dim,
-                        n_features=n_features_per_level,
-                        hashmap_size=hashmap_size,
-                        resolution=resolution,
-                        rank=rank,
-                    )
-                )
+            )
+            # levels.append(
+            #     _HashGrid(
+            #         dim=dim,
+            #         n_features=n_features_per_level,
+            #         hashmap_size=2 ** 16,
+            #         resolution=resolution,
+            #     )
+            # )
+
+            # if rank is None:
+            #     levels.append(
+            #         _HashGrid(
+            #             dim=dim,
+            #             n_features=n_features_per_level,
+            #             hashmap_size=hashmap_size,
+            #             resolution=resolution,
+            #         )
+            #     )
+            # else:
+            #     levels.append(
+            #         _HashGridLoRA(
+            #             dim=dim,
+            #             n_features=n_features_per_level,
+            #             hashmap_size=hashmap_size,
+            #             resolution=resolution,
+            #             rank=rank,
+            #         )
+            #     )
         self.levels = nn.ModuleList(levels)
 
         self.input_dim = dim
