@@ -100,11 +100,12 @@ class HashGridEncoder(nn.Module):
             finest_resolution=finest_resolution,
         ).cuda()
 
-    def forward(self, x):
+    def forward(self, x, softmax_t=1):
         n_rays = x.shape[0]
         x = (x - self.mesh_min) / (self.mesh_max - self.mesh_min)
         x = x.reshape(-1, self.input_dim)
-        x = self.enc(x).float()
+        x = self.enc(x)#, softmax_t=softmax_t)
+        x = x.float()
         x = x.reshape(n_rays, -1)
         return x   
 
@@ -566,7 +567,7 @@ class NBVHModel(nn.Module):
 
         self.days = 0
 
-    def net_forward(self, orig, end, bbox_idxs, initial=False, true_depth=None):
+    def net_forward(self, orig, end, bbox_idxs, initial=False, true_depth=None, softmax_t=1.0):
         with torch.no_grad():
             orig = orig.clone()
         # orig.requires_grad = True
@@ -648,7 +649,7 @@ class NBVHModel(nn.Module):
         dir = dir / torch.norm(dir, dim=-1, keepdim=True)
 
         if type(self.encoder) == HashGridEncoder:
-            bbox_features = self.encoder(inp)
+            bbox_features = self.encoder(inp)#, softmax_t=softmax_t)
         elif type(self.encoder) in [BBoxEncoder, HashBBoxEncoder, HashMultiBBoxEncoder]:
             bbox_features = self.encoder(inp, bbox_idxs)
         elif type(self.encoder) == CodebookEncoder:
@@ -676,7 +677,7 @@ class NBVHModel(nn.Module):
 
         return pred_cls, pred_dist, pred_normal
 
-    def get_loss(self, batch, bar=None):
+    def get_loss(self, batch, bar=None, softmax_t=1.0):
         orig = batch.ray_origins
         end = batch.ray_vectors
         bbox_idxs = batch.bbox_idxs
@@ -690,8 +691,8 @@ class NBVHModel(nn.Module):
         masks = torch.ones((n_rays,), dtype=torch.bool, device="cuda")
         self.bvh.fill_history(masks, bbox_idxs, depth, history)
 
-        pred_cls, pred_dist, pred_normal = self.net_forward(orig, end, bbox_idxs, initial=False, true_depth=dist)
-        
+        pred_cls, pred_dist, pred_normal = self.net_forward(orig, end, bbox_idxs, initial=False, true_depth=dist, softmax_t=softmax_t)
+
         # cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float()) * 10 #, weight=hit_mask.float() * 0.9 + 0.1)
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float(), weight=hit_mask.float() * 0 + 1)
         mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask])

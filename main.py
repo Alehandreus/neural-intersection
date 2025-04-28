@@ -82,7 +82,7 @@ def main(cfg):
     # save_rays_blender(bvh_data, bvh, 100000)
     # exit()
 
-    nbvh_depth = 9
+    nbvh_depth = 13
     # bvh.grow_nbvh(2)
     # bvh.grow_nbvh(10)
     bvh.grow_nbvh(nbvh_depth - 1)
@@ -92,7 +92,7 @@ def main(cfg):
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=12, n_levels=8, finest_resolution=256, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=21, finest_resolution=512, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=18, base_resolution=8, n_levels=8, finest_resolution=2 ** 8, n_features_per_level=4, bvh_data=bvh_data, bvh=bvh)
-    encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=16, base_resolution=8, n_levels=8, finest_resolution=2 ** 8, n_features_per_level=4, bvh_data=bvh_data, bvh=bvh)
+    encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=18, base_resolution=8, n_levels=8, finest_resolution=2 ** 7, n_features_per_level=4, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=15, base_resolution=8, n_levels=8, finest_resolution=2 ** 8, n_features_per_level=4, bvh_data=bvh_data, bvh=bvh)
     # encoder = BBoxEncoder(cfg, enc_dim=2, enc_depth=8, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashBBoxEncoder(cfg, table_size=2**18, enc_dim=8, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
@@ -120,7 +120,7 @@ def main(cfg):
         bvh=bvh,
     )
 
-    name = "4"
+    name = "0"
     trainer.set_model(model, name)
     trainer.cam(initial=True)
     for i in range(100):

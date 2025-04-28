@@ -57,6 +57,18 @@ class Trainer:
         bar = tqdm(range(self.ds_train.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_train.get_batch(batch_idx)
+
+            softmax_t = 1.0
+            # if self.n_epoch > 3:
+            #     softmax_t = 1000
+            # elif self.n_epoch == 3:
+            #     softmax_t = 100
+            # elif self.n_epoch == 2:
+            #     softmax_t = 10
+            # if self.n_epoch > 3:
+            #     cur_steps = self.n_steps % 800
+            #     softmax_t = 1 + 99 * (cur_steps / 800) ** 2
+            # softmax_t = 1 + 100 * (self.n_steps / 2400) ** 3
             loss, acc, mse, norm_mse = self.model.get_loss(batch, bar=bar)
 
             loss.backward()
@@ -121,7 +133,7 @@ class Trainer:
         bar = tqdm(range(self.ds_cam.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_cam.get_batch(batch_idx)
-            mask_pred, dist_pred, normal_pred = self.model(batch, initial=initial, true_dist=batch.t)
+            mask_pred, dist_pred, normal_pred = self.model(batch, initial=initial)#, true_dist=batch.t)
             
             dist_pred = dist_pred.detach()
             normal_pred = normal_pred.detach()

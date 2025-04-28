@@ -103,7 +103,7 @@ class _HashGrid(nn.Module):
         bin_mask = torch.tensor(neigs & (1 << dims) == 0, dtype=bool)  # (neig, dim)
         self.register_buffer("bin_mask", bin_mask, persistent=False)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, softmax_t=None):
         # x: (b..., dim), torch.float32, range: [0, 1]
         bdims = len(x.shape[:-1])
         x = x * self.resolution
@@ -157,7 +157,7 @@ class _LearnableHashGrid(nn.Module):
         bin_mask = torch.tensor(neigs & (1 << dims) == 0, dtype=bool)  # (neig, dim)
         self.register_buffer("bin_mask", bin_mask, persistent=False)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor, softmax_t=1.0):
 
         # x: (b..., dim), torch.float32, range: [0, 1]
         bdims = len(x.shape[:-1])
@@ -179,7 +179,6 @@ class _LearnableHashGrid(nn.Module):
         hash_ids = fast_hash(inds, self.primes, self.index_table_size)  # (b..., neig)
 
         # hash_ids = hash_ids.flatten()
-        
 
         # print(x.shape)
         # print(hash_ids.shape)
@@ -196,7 +195,7 @@ class _LearnableHashGrid(nn.Module):
             features = self.feature_table(a)
             # print(features.shape)
 
-            feature_weights = F.softmax(feature_weights * 10, dim=-1)
+            feature_weights = F.softmax(feature_weights * softmax_t, dim=-1)
 
             features = (features * feature_weights[..., None]).sum(dim=-2)
 
@@ -207,19 +206,17 @@ class _LearnableHashGrid(nn.Module):
             # print(features.shape)
 
             return features
-        
-        else:
-            b = feature_weights.argmax(dim=-1, keepdim=True)
-            a = torch.gather(a, dim=2, index=b)
-            a = a.squeeze(2)
 
-            # print(a.shape)            
+        else:
+            # b = feature_weights.argmax(dim=-1, keepdim=True)
+            # a = torch.gather(a, dim=2, index=b)
+            # a = a.squeeze(2)
             
             features = self.feature_table(a)
-            # print(features.shape)
 
             # feature_weights = ((feature_weights - feature_weights.max(dim=2, keepdim=True).values) >= 0).float()
-            # features = (features * feature_weights[..., None]).sum(dim=-2)
+            feature_weights = F.softmax(feature_weights * softmax_t, dim=-1)
+            features = (features * feature_weights[..., None]).sum(dim=-2)
 
             features = (features * w).sum(dim=-2)
 
@@ -362,48 +359,49 @@ class MultiResHashGrid(nn.Module):
             resolution = math.floor(base_resolution * (b**level_idx))
             hashmap_size = min(resolution**dim, 2**log2_hashmap_size)
             hashmap_size = 2**math.ceil(math.log2(hashmap_size))
+            # levels.append(
+            #     _LearnableHashGrid(
+            #         dim=dim,
+            #         n_features=n_features_per_level,
+            #         feature_table_size=2 ** 8,
+            #         index_table_size=2 ** 15,
+            #         n_learnable_indices=64,
+            #         resolution=resolution,
+            #     )
+            # )           
             levels.append(
-                _LearnableHashGrid(
+                _HashGrid(
                     dim=dim,
                     n_features=n_features_per_level,
-                    feature_table_size=2 ** 16,
-                    index_table_size=2 ** 22,
-                    n_learnable_indices=32,
+                    hashmap_size=2 ** 14,
                     resolution=resolution,
                 )
             )
-            # levels.append(
-            #     _HashGrid(
-            #         dim=dim,
-            #         n_features=n_features_per_level,
-            #         hashmap_size=2 ** 16,
-            #         resolution=resolution,
-            #     )
-            # )
+            continue
 
-            # if rank is None:
-            #     levels.append(
-            #         _HashGrid(
-            #             dim=dim,
-            #             n_features=n_features_per_level,
-            #             hashmap_size=hashmap_size,
-            #             resolution=resolution,
-            #         )
-            #     )
-            # else:
-            #     levels.append(
-            #         _HashGridLoRA(
-            #             dim=dim,
-            #             n_features=n_features_per_level,
-            #             hashmap_size=hashmap_size,
-            #             resolution=resolution,
-            #             rank=rank,
-            #         )
-            #     )
+            if rank is None:
+                levels.append(
+                    _HashGrid(
+                        dim=dim,
+                        n_features=n_features_per_level,
+                        hashmap_size=hashmap_size,
+                        resolution=resolution,
+                    )
+                )
+            else:
+                levels.append(
+                    _HashGridLoRA(
+                        dim=dim,
+                        n_features=n_features_per_level,
+                        hashmap_size=hashmap_size,
+                        resolution=resolution,
+                        rank=rank,
+                    )
+                )
         self.levels = nn.ModuleList(levels)
 
         self.input_dim = dim
         self.output_dim = n_levels * n_features_per_level
 
-    def forward(self, x: torch.Tensor):
-        return torch.cat([level(x) for level in self.levels], dim=-1)
+    def forward(self, x: torch.Tensor, softmax_t=1.0):
+        return torch.cat([level(x, softmax_t=softmax_t) for level in self.levels], dim=-1)
