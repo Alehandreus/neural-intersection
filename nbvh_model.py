@@ -565,6 +565,19 @@ class NBVHModel(nn.Module):
         ]
         self.mlp = nn.Sequential(*self.mlp).cuda()
 
+        # self.mlp = nn.Sequential(
+        #     nn.Conv1d(self.encoder.out_dim(), 64, kernel_size=3, padding=1),
+        #     nn.ReLU(),
+        #     nn.Conv1d(64, 64, kernel_size=3, padding=1),
+        #     nn.ReLU(),
+        #     nn.Conv1d(64, 64, kernel_size=3, padding=1),
+        #     nn.ReLU(),
+        #     nn.Conv1d(64, 64, kernel_size=3, padding=1),
+        #     nn.ReLU(),
+        #     nn.Flatten(),
+        #     nn.Linear(self.n_points * 64, self.out_dim)
+        # ).cuda()
+
         self.days = 0
 
     def net_forward(self, orig, end, bbox_idxs, initial=False, true_depth=None, softmax_t=1.0):
@@ -657,7 +670,10 @@ class NBVHModel(nn.Module):
         else:
             raise NotImplementedError
 
-        a = self.mlp(bbox_features).float()
+        # a = self.mlp(bbox_features).float()
+        features = bbox_features.reshape(-1, self.n_points, self.encoder.out_dim())
+        features = features.permute(0, 2, 1)
+        a = self.mlp(features)
 
         pred_cls = a[:, 0]
         pred_dist = a[:, 1] + before
@@ -840,8 +856,8 @@ class NBVHModel2(nn.Module):
         lengths = torch.norm(end - orig, dim=1)
         dist_per_segment = lengths / (self.n_points - 1)
         dist_segment_pred = pred_cls.argmax(dim=1)
-        mask = ((pred_cls - pred_cls.max(dim=1, keepdim=True).values) >= 0).float()
-        # mask = F.softmax(pred_cls, dim=-1)
+        # mask = ((pred_cls - pred_cls.max(dim=1, keepdim=True).values) >= 0).float()
+        mask = F.softmax(pred_cls, dim=-1)
 
         dist = (pred_dist * mask).sum(dim=1) * dist_per_segment + dist_segment_pred * dist_per_segment
         normal = (pred_normal * mask[:, :, None]).sum(dim=1)
@@ -882,15 +898,15 @@ class NBVHModel2(nn.Module):
         true_segment[true_segment >= self.n_points - 1] = self.n_points - 2
         true_segment[true_segment < 0] = 0
 
-        mask = ((pred_cls - pred_cls.max(dim=1, keepdim=True).values) >= 0).float()
-        # mask = F.softmax(pred_cls, dim=-1)
+        # mask = ((pred_cls - pred_cls.max(dim=1, keepdim=True).values) >= 0).float()
+        mask = F.softmax(pred_cls, dim=-1)
         true_mask = torch.zeros_like(mask).scatter_(dim=1, index=true_segment[:, None], src=torch.ones_like(mask))
 
         segment_cls_loss = F.binary_cross_entropy_with_logits(pred_cls, true_mask)
 
         pred_dist = (pred_dist * true_mask).sum(dim=1) * dist_per_segment + true_segment * dist_per_segment
-        pred_normal = (pred_normal * true_mask[:, :, None]).sum(dim=1)
-        # pred_normal = (pred_normal * mask[:, :, None]).sum(dim=1)
+        # pred_normal = (pred_normal * true_mask[:, :, None]).sum(dim=1)
+        pred_normal = (pred_normal * mask[:, :, None]).sum(dim=1)
 
         normal_norm = torch.norm(pred_normal, dim=-1, keepdim=True)
         normal_norm = normal_norm * (normal_norm > 0) + (normal_norm == 0)
