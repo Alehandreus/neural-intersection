@@ -565,21 +565,6 @@ class NBVHModel(nn.Module):
         ]
         self.mlp = nn.Sequential(*self.mlp).cuda()
 
-        # self.mlp = nn.Sequential(
-        #     nn.Conv1d(self.encoder.out_dim(), 64, kernel_size=3, padding=1),
-        #     nn.ReLU(),
-        #     nn.Conv1d(64, 64, kernel_size=3, padding=1),
-        #     nn.ReLU(),
-        #     nn.Conv1d(64, 64, kernel_size=3, padding=1),
-        #     nn.ReLU(),
-        #     nn.Conv1d(64, 64, kernel_size=3, padding=1),
-        #     nn.ReLU(),
-        #     nn.Flatten(),
-        #     nn.Linear(self.n_points * 64, self.out_dim)
-        # ).cuda()
-
-        self.days = 0
-
     def net_forward(self, orig, end, bbox_idxs, initial=False, true_depth=None, softmax_t=1.0):
         with torch.no_grad():
             orig = orig.clone()
@@ -713,7 +698,6 @@ class NBVHModel(nn.Module):
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float(), weight=hit_mask.float() * 0 + 1)
         mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask])
         norm_mse_loss = F.mse_loss(pred_normal[hit_mask], normals[hit_mask])
-        # norm_mse_loss = F.l1_loss(pred_normal[hit_mask], normals[hit_mask])
 
         acc = ((pred_cls > 0) == hit_mask).float().mean().item()
 
@@ -816,8 +800,6 @@ class NBVHModel2(nn.Module):
         self.dist_head = nn.Linear(self.inner_dim, 1).cuda()
         self.normal_head = nn.Linear(self.inner_dim, 3).cuda()
 
-        self.days = 0
-
     def net_forward(self, orig, end, bbox_idxs, initial=False, true_depth=None, raw=False):
         dirs = end - orig
         norms = torch.norm(dirs, keepdim=True)
@@ -870,8 +852,6 @@ class NBVHModel2(nn.Module):
         normal_norm = torch.norm(normal, dim=-1, keepdim=True)
         normal_norm[normal_norm == 0] = 1
         normal = normal / normal_norm
-        # normal[torch.norm(normal, dim=-1) < 1e-6, :] = 1
-        # normal = normal / torch.norm(normal, dim=-1, keepdim=True)
 
         return pred_cls_global, dist, normal
 
@@ -916,7 +896,6 @@ class NBVHModel2(nn.Module):
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls_global, hit_mask.float(), weight=hit_mask.float() * 1 + 1)
         mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask])
         norm_mse_loss = F.mse_loss(pred_normal[hit_mask], normals[hit_mask])
-        # norm_mse_loss = F.l1_loss(pred_normal[hit_mask], normals[hit_mask])
 
         acc = ((pred_cls_global > 0) == hit_mask).float().mean().item()
 

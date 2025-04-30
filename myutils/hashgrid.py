@@ -178,12 +178,7 @@ class _LearnableHashGrid(nn.Module):
         # hash neighbors' id and look up table
         hash_ids = fast_hash(inds, self.primes, self.index_table_size)  # (b..., neig)
 
-        # hash_ids = hash_ids.flatten()
-
-        # print(x.shape)
-        # print(hash_ids.shape)
         feature_weights = self.index_table(hash_ids)
-        # print(feature_weights.shape)
 
         a = torch.arange(0, self.n_learnable_indices, device=x.device)[None, None, :]
         a = (a * PRIMES[1]) ^ (hash_ids[:, :, None] * PRIMES[2])
@@ -191,20 +186,10 @@ class _LearnableHashGrid(nn.Module):
         # print(a.shape)
 
         if self.training:
-
             features = self.feature_table(a)
-            # print(features.shape)
-
             feature_weights = F.softmax(feature_weights * softmax_t, dim=-1)
-
             features = (features * feature_weights[..., None]).sum(dim=-2)
-
-            # print(features.shape)
-
             features = (features * w).sum(dim=-2)
-
-            # print(features.shape)
-
             return features
 
         else:
@@ -214,40 +199,12 @@ class _LearnableHashGrid(nn.Module):
             
             features = self.feature_table(a)
 
-            # feature_weights = ((feature_weights - feature_weights.max(dim=2, keepdim=True).values) >= 0).float()
             feature_weights = F.softmax(feature_weights * softmax_t, dim=-1)
             features = (features * feature_weights[..., None]).sum(dim=-2)
 
             features = (features * w).sum(dim=-2)
 
-            # print(features.shape)
-
             return features
-
-        exit()
-
-        ######
-
-        # x: (b..., dim), torch.float32, range: [0, 1]
-        bdims = len(x.shape[:-1])
-        x = x * self.resolution
-        xi = x.long()
-        xf = x - xi.float().detach()
-        xi = xi.unsqueeze(dim=-2)  # (b..., 1, dim)
-        xf = xf.unsqueeze(dim=-2)  # (b..., 1, dim)
-        # to match the input batch shape
-        bin_mask = self.bin_mask.reshape(
-            (1,) * bdims + self.bin_mask.shape
-        )  # (1..., neig, dim)
-        # get neighbors' indices and weights on each dim
-        inds = torch.where(bin_mask, xi, xi + 1)  # (b..., neig, dim)
-        ws = torch.where(bin_mask, 1 - xf, xf)  # (b...., neig, dim)
-        # aggregate nehgibors' interp weights
-        w = ws.prod(dim=-1, keepdim=True)  # (b..., neig, 1)
-        # hash neighbors' id and look up table
-        hash_ids = fast_hash(inds, self.primes, self.hashmap_size)  # (b..., neig)
-        neig_data = self.embedding(hash_ids)  # (b..., neig, feat)
-        return torch.sum(neig_data * w, dim=-2)  # (b..., feat)
     
 
 class _HashGridLoRA(nn.Module):
@@ -369,15 +326,15 @@ class MultiResHashGrid(nn.Module):
             #         resolution=resolution,
             #     )
             # )           
-            levels.append(
-                _HashGrid(
-                    dim=dim,
-                    n_features=n_features_per_level,
-                    hashmap_size=2 ** 14,
-                    resolution=resolution,
-                )
-            )
-            continue
+            # levels.append(
+            #     _HashGrid(
+            #         dim=dim,
+            #         n_features=n_features_per_level,
+            #         hashmap_size=2 ** 14,
+            #         resolution=resolution,
+            #     )
+            # )
+            # continue
 
             if rank is None:
                 levels.append(
