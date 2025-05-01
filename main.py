@@ -1,5 +1,6 @@
 import hydra
 import torch
+import gc
 
 from myutils.misc import *
 from myutils.ray import *
@@ -65,9 +66,53 @@ def save_rays_blender(bvh_data, bvh, batch_size):
             vertex_index += 4
 
 @hydra.main(config_path="config", config_name="nbvh", version_base=None)
-def main(cfg):
-    torch.set_float32_matmul_precision("high")
+def test_mem(cfg):
+    mesh = Mesh(cfg.mesh.path)
+    builder = CPUBuilder(mesh)
+    bvh_data = builder.build_bvh(cfg.mesh.bvh_depth)
+    bvh = GPUTraverser(bvh_data)
+    bvh.grow_nbvh(12)
 
+    trainer = Trainer(cfg, tqdm_leave=True, bvh=bvh)
+
+    for log2_hashmap_size in [4, 5, 6, 7, 8, 9, 10, 11, 12, 16, 20]:
+        encoder = HashGridEncoder(
+            cfg,
+            dim=3,
+            log2_hashmap_size=log2_hashmap_size,
+            base_resolution=8,
+            n_levels=8,
+            finest_resolution=2 ** 7,
+            n_features_per_level=4,
+            bvh_data=bvh_data,
+            bvh=bvh,
+            enable_vqad=True,
+            vqad_rank=None,
+            index_table_size=2 ** 10,
+        )
+
+        # model = NBVHModel(
+        #     cfg=cfg,
+        #     n_layers=4,
+        #     inner_dim=64,
+        #     n_points=8,
+        #     encoder=encoder,
+        #     bvh_data=bvh_data,
+        #     bvh=bvh,
+        # )
+
+        # trainer.set_model(model, name="0")
+        # trainer.train()
+        # mem_usage = torch.cuda.memory_allocated(0) / (2 ** 30)
+
+        # print(f"HMSIZE: {log2_hashmap_size}; MEMUSAGE: {encoder}")
+
+        del encoder, model
+        gc.collect()
+
+
+@hydra.main(config_path="config", config_name="nbvh", version_base=None)
+def main(cfg):
     mesh = Mesh(cfg.mesh.path)
     # mesh.split_faces(0.5)
     builder = CPUBuilder(mesh)
@@ -92,19 +137,34 @@ def main(cfg):
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=12, n_levels=8, finest_resolution=256, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=21, finest_resolution=512, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=18, base_resolution=8, n_levels=8, finest_resolution=2 ** 8, n_features_per_level=4, bvh_data=bvh_data, bvh=bvh)
-    encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=18, base_resolution=8, n_levels=8, finest_resolution=2 ** 7, n_features_per_level=4, bvh_data=bvh_data, bvh=bvh)
+    # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=16, base_resolution=8, n_levels=8, finest_resolution=2 ** 7, n_features_per_level=4, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashGridEncoder(cfg, dim=3, log2_hashmap_size=15, base_resolution=8, n_levels=8, finest_resolution=2 ** 8, n_features_per_level=4, bvh_data=bvh_data, bvh=bvh)
     # encoder = BBoxEncoder(cfg, enc_dim=2, enc_depth=8, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashBBoxEncoder(cfg, table_size=2**18, enc_dim=8, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashMultiBBoxEncoder(cfg, table_size=2**11 * 3, enc_dim=24, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashMultiBBoxEncoder(cfg, table_size=2**20, enc_dim=4, enc_depth=8, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
-    # encoder = CodebookEncoder(cfg, enc_dim=16, enc_depth=4, full/_depth=9, codebook_bitwidth=8)
+    # encoder = CodebookEncoder(cfg, enc_dim=16, enc_depth=4, full_depth=8, codebook_bitwidth=8
+
+
+    encoder = HashGridEncoder(
+        cfg,
+        dim=3,
+        log2_hashmap_size=8,
+        base_resolution=8,
+        n_levels=8,
+        finest_resolution=2 ** 7,
+        n_features_per_level=4,
+        bvh_data=bvh_data,
+        bvh=bvh,
+        enable_vqad=False,
+        vqad_rank=None,
+    )
 
     # model = NBVHModel2(
     #     cfg=cfg,
     #     n_layers=4,
     #     inner_dim=64,
-    #     n_points=4,
+    #     n_points=16,
     #     encoder=encoder,
     #     bvh_data=bvh_data,
     #     bvh=bvh,
@@ -114,7 +174,7 @@ def main(cfg):
         cfg=cfg,
         n_layers=4,
         inner_dim=64,
-        n_points=4,
+        n_points=8,
         encoder=encoder,
         bvh_data=bvh_data,
         bvh=bvh,
@@ -122,14 +182,14 @@ def main(cfg):
 
     name = "0"
     trainer.set_model(model, name)
-    trainer.cam(initial=True)
+    # trainer.cam(initial=True)
     for i in range(100):
         print("Epoch", i)
         trainer.train()
         # trainer.val()
         # encoder.grid.bake()
         # encoder.grid.freeze()
-        trainer.cam()
+        # trainer.cam()
 
         # if i < nbvh_depth - 1:
         #     bvh.grow_nbvh(1)
@@ -137,7 +197,9 @@ def main(cfg):
 
 if __name__ == "__main__":
     try:
-        main()        
+        torch.set_float32_matmul_precision("high")
+        main()
+        # test_mem()
     except KeyboardInterrupt:
         print("Stopping...")
         exit()

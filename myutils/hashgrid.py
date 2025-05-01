@@ -279,6 +279,9 @@ class MultiResHashGrid(nn.Module):
         base_resolution: int = 16,
         finest_resolution: int = 512,
         rank=None,
+        enable_vqad=False,
+        vqad_rank=None,
+        index_table_size=None,
     ):
         """NVidia's hash grid encoding
         https://nvlabs.github.io/instant-ngp/
@@ -316,6 +319,41 @@ class MultiResHashGrid(nn.Module):
             resolution = math.floor(base_resolution * (b**level_idx))
             hashmap_size = min(resolution**dim, 2**log2_hashmap_size)
             hashmap_size = 2**math.ceil(math.log2(hashmap_size))
+
+            if not enable_vqad:
+                if rank is None:
+                    levels.append(
+                        _HashGrid(
+                            dim=dim,
+                            n_features=n_features_per_level,
+                            hashmap_size=hashmap_size,
+                            resolution=resolution,
+                        )
+                    )
+                else:
+                    levels.append(
+                        _HashGridLoRA(
+                            dim=dim,
+                            n_features=n_features_per_level,
+                            hashmap_size=hashmap_size,
+                            resolution=resolution,
+                            rank=rank,
+                        )
+                    )
+            else:
+                if vqad_rank is None: vqad_rank = hashmap_size
+
+                levels.append(
+                    _LearnableHashGrid(
+                        dim=dim,
+                        n_features=n_features_per_level,
+                        feature_table_size=hashmap_size,
+                        index_table_size=index_table_size,
+                        n_learnable_indices=vqad_rank,
+                        resolution=resolution,
+                    )
+                )                
+
             # levels.append(
             #     _LearnableHashGrid(
             #         dim=dim,
@@ -336,25 +374,25 @@ class MultiResHashGrid(nn.Module):
             # )
             # continue
 
-            if rank is None:
-                levels.append(
-                    _HashGrid(
-                        dim=dim,
-                        n_features=n_features_per_level,
-                        hashmap_size=hashmap_size,
-                        resolution=resolution,
-                    )
-                )
-            else:
-                levels.append(
-                    _HashGridLoRA(
-                        dim=dim,
-                        n_features=n_features_per_level,
-                        hashmap_size=hashmap_size,
-                        resolution=resolution,
-                        rank=rank,
-                    )
-                )
+            # if rank is None:
+            #     levels.append(
+            #         _HashGrid(
+            #             dim=dim,
+            #             n_features=n_features_per_level,
+            #             hashmap_size=hashmap_size,
+            #             resolution=resolution,
+            #         )
+            #     )
+            # else:
+            #     levels.append(
+            #         _HashGridLoRA(
+            #             dim=dim,
+            #             n_features=n_features_per_level,
+            #             hashmap_size=hashmap_size,
+            #             resolution=resolution,
+            #             rank=rank,
+            #         )
+            #     )
         self.levels = nn.ModuleList(levels)
 
         self.input_dim = dim
