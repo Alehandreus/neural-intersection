@@ -133,7 +133,7 @@ class Trainer:
         bar = tqdm(range(self.ds_cam.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_cam.get_batch(batch_idx)
-            mask_pred, dist_pred, normal_pred = self.model(batch, initial=initial)#, true_dist=batch.t)
+            mask_pred, dist_pred, normal_pred = self.model(batch, initial=initial, true_batch=batch)#, true_dist=batch.t)
             
             dist_pred = dist_pred.detach()
             normal_pred = normal_pred.detach()
@@ -173,8 +173,8 @@ class Trainer:
 
         # colors_pred = (colors_pred > 0).float()
 
-        colors[img_dist == 0] = 0
-        colors_pred[img_mask_pred == 0] = 0
+        colors[img_dist == 0] = 1
+        colors_pred[img_mask_pred == 0] = 1
 
         mse = ((colors - colors_pred) ** 2).mean()
         print(f"Cam mse: {mse:.5f}")
@@ -185,8 +185,8 @@ class Trainer:
         self.writer.add_scalar("PSNR/cam", psnr.item(), self.n_steps)
 
         # banana for reference
-        colors[0, 0, 0] = 1.0
-        colors_pred[0, 0, 0] = 1.0
+        colors[0, 0, 0] = 0.0
+        colors_pred[0, 0, 0] = 0.0
 
         import os
         os.makedirs('images/' + self.name, exist_ok=True)

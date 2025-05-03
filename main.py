@@ -127,9 +127,7 @@ def main(cfg):
     # save_rays_blender(bvh_data, bvh, 100000)
     # exit()
 
-    nbvh_depth = 13
-    # bvh.grow_nbvh(2)
-    # bvh.grow_nbvh(10)
+    nbvh_depth = 10
     bvh.grow_nbvh(nbvh_depth - 1)
 
     trainer = Trainer(cfg, tqdm_leave=True, bvh=bvh)
@@ -143,22 +141,34 @@ def main(cfg):
     # encoder = HashBBoxEncoder(cfg, table_size=2**18, enc_dim=8, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashMultiBBoxEncoder(cfg, table_size=2**11 * 3, enc_dim=24, enc_depth=6, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
     # encoder = HashMultiBBoxEncoder(cfg, table_size=2**20, enc_dim=4, enc_depth=8, total_depth=nbvh_depth, bvh_data=bvh_data, bvh=bvh)
-    # encoder = CodebookEncoder(cfg, enc_dim=16, enc_depth=4, full_depth=8, codebook_bitwidth=8
-
+    # encoder = CodebookEncoder(cfg, enc_dim=16, enc_depth=4, full_depth=7, codebook_bitwidth=4)
 
     encoder = HashGridEncoder(
         cfg,
         dim=3,
-        log2_hashmap_size=8,
-        base_resolution=8,
-        n_levels=8,
-        finest_resolution=2 ** 7,
-        n_features_per_level=4,
+        log2_hashmap_size=10,
+        base_resolution=2**3,
+        n_levels=4,
+        finest_resolution=2**7,
+        n_features_per_level=16,
         bvh_data=bvh_data,
         bvh=bvh,
-        enable_vqad=False,
-        vqad_rank=None,
+        enable_vqad=True,
+        vqad_rank=32,
+        index_table_size=2**17,
     )
+
+    # encoder = HashGridEncoder(
+    #     cfg,
+    #     dim=3,
+    #     log2_hashmap_size=12,
+    #     base_resolution=2**3,
+    #     n_levels=8,
+    #     finest_resolution=2**7,
+    #     n_features_per_level=16,
+    #     bvh_data=bvh_data,
+    #     bvh=bvh,
+    # )    
 
     # model = NBVHModel2(
     #     cfg=cfg,
@@ -174,22 +184,22 @@ def main(cfg):
         cfg=cfg,
         n_layers=4,
         inner_dim=64,
-        n_points=8,
+        n_points=4,
         encoder=encoder,
         bvh_data=bvh_data,
         bvh=bvh,
     )
 
-    name = "0"
+    name = "1"
     trainer.set_model(model, name)
-    # trainer.cam(initial=True)
+    trainer.cam(initial=True)
     for i in range(100):
         print("Epoch", i)
         trainer.train()
         # trainer.val()
         # encoder.grid.bake()
         # encoder.grid.freeze()
-        # trainer.cam()
+        trainer.cam()
 
         # if i < nbvh_depth - 1:
         #     bvh.grow_nbvh(1)

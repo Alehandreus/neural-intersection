@@ -61,6 +61,9 @@ class HashGridEncoder(nn.Module):
         finest_resolution=512,
         bvh_data=None,
         bvh=None,
+        enable_vqad=False,
+        vqad_rank=None,
+        index_table_size=None,
     ):
         super().__init__()
 
@@ -98,6 +101,9 @@ class HashGridEncoder(nn.Module):
             log2_hashmap_size=log2_hashmap_size,
             base_resolution=base_resolution,
             finest_resolution=finest_resolution,
+            enable_vqad=enable_vqad,
+            vqad_rank=vqad_rank,
+            index_table_size=index_table_size,
         ).cuda()
 
     def forward(self, x, softmax_t=1):
@@ -654,11 +660,13 @@ class NBVHModel(nn.Module):
             bbox_features = self.encoder(inp)
         else:
             raise NotImplementedError
+        
+        # print(bbox_features.shape, self.encoder.out_dim())
 
-        # a = self.mlp(bbox_features).float()
-        features = bbox_features.reshape(-1, self.n_points, self.encoder.out_dim())
-        features = features.permute(0, 2, 1)
-        a = self.mlp(features)
+        a = self.mlp(bbox_features).float()
+        # features = bbox_features.reshape(-1, self.n_points, self.encoder.out_dim())
+        # features = features.permute(0, 2, 1)
+        # a = self.mlp(features)
 
         pred_cls = a[:, 0]
         pred_dist = a[:, 1] + before
@@ -698,14 +706,16 @@ class NBVHModel(nn.Module):
         cls_loss = F.binary_cross_entropy_with_logits(pred_cls, hit_mask.float(), weight=hit_mask.float() * 0 + 1)
         mse_loss = F.mse_loss(pred_dist[hit_mask], dist[hit_mask])
         norm_mse_loss = F.mse_loss(pred_normal[hit_mask], normals[hit_mask])
+        # norm_mse_loss = F.l1_loss(pred_normal[hit_mask], normals[hit_mask])
 
         acc = ((pred_cls > 0) == hit_mask).float().mean().item()
 
-        loss = cls_loss + mse_loss + norm_mse_loss
+        # loss = cls_loss + mse_loss + norm_mse_loss
+        loss = norm_mse_loss
 
         return loss, acc, mse_loss, norm_mse_loss
 
-    def forward(self, batch, initial=False, true_dist=None):
+    def forward(self, batch, initial=False, true_batch=None):
         orig = batch.ray_origins
         vec = batch.ray_vectors
 
@@ -736,6 +746,10 @@ class NBVHModel(nn.Module):
             pred_cls = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, pred_cls_c)
             pred_dist = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, pred_dist_c) + cur_t1
             pred_normals = torch.zeros((n_rays, 3), device="cuda").masked_scatter_(cur_mask[:, None].expand(-1, 3), pred_normal_c)
+
+            if true_batch is not None:
+                pred_cls = (cur_t1 < true_batch.t) & (true_batch.t < cur_t2)
+                # pred_normals = true_batch.normals
 
             update_mask = (pred_cls > 0) & (pred_dist < dist) & cur_mask
             dist[update_mask] = pred_dist[update_mask]

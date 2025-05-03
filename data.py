@@ -201,5 +201,8 @@ class NBVHDataset(Dataset):
 
         n_generated = self.fill_batch_data()
         batch = self.batch_data.get_compacted(n_generated)
+
+        # print(n_generated)
+        # exit()
         
         return batch
