@@ -159,11 +159,21 @@ class Trainer:
         light_dir = torch.tensor([1.0, -2.0, 1.5], device="cuda")
         light_dir /= torch.norm(light_dir)
 
-        colors = torch.sum(img_normal * light_dir[None, None, None, :], dim=-1, keepdim=True)# * 0.5 + 0.5
-        colors[colors < 0] = -colors[colors < 0]
-        colors = colors * 0.5 + 0.5
-        colors_pred = torch.sum(img_normal_pred * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
-        colors_pred[colors_pred < 0.5] = 0.5
+        # red = torch.tensor([187, 143, 138,], device='cuda') / 255.0
+        red = torch.tensor([1.0, 1.0, 1.0,], device='cuda')
+        # red = red ** 2
+
+        # a = torch.norm(img_normal, dim=-1, keepdim=True)
+        # img_normal[a.sum(dim=)] = img_normal / 
+
+        gs = torch.sum(img_normal * light_dir[None, None, None, :], dim=-1, keepdim=True)# * 0.5 + 0.5
+        gs[gs < 0] = -gs[gs < 0]
+        gs = gs * 0.5 + 0.5
+        colors = gs * red[None, None, None, :]
+
+        gs_pred = torch.sum(img_normal_pred * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
+        gs_pred[gs_pred < 0.5] = 0.5
+        colors_pred = gs_pred * red[None, None, None, :]
 
         # colors = (img_dist > 0).float()
         # colors_pred = (img_dist_pred > 0).float()        
@@ -173,8 +183,8 @@ class Trainer:
 
         # colors_pred = (colors_pred > 0).float()
 
-        colors[img_dist == 0] = 1
-        colors_pred[img_mask_pred == 0] = 1
+        colors[img_dist.squeeze(-1) == 0, :] = 1
+        colors_pred[img_mask_pred.squeeze(-1) == 0, :] = 1
 
         mse = ((colors - colors_pred) ** 2).mean()
         print(f"Cam mse: {mse:.5f}")
@@ -189,23 +199,23 @@ class Trainer:
         colors_pred[0, 0, 0] = 0.0
 
         import os
-        os.makedirs('images/' + self.name, exist_ok=True)
+        os.makedirs(f'{self.cfg.log_dir}/images/{self.name}', exist_ok=True)
         from PIL import Image
         import numpy as np
         Image.fromarray(
-            (colors[0, :, :, 0].cpu().numpy() * 255).astype(np.uint8)
-        ).convert("L").save(f"images/{self.name}/cam.png")
+            (colors[0, :, :, :].cpu().numpy() * 255).astype(np.uint8)
+        ).convert("RGB").save(f"{self.cfg.log_dir}/images/{self.name}/cam.png")
         Image.fromarray(
-            (colors_pred[0, :, :, 0].cpu().numpy() * 255).astype(np.uint8)
-        ).convert("L").save(f"images/{self.name}/cam_pred.png")
+            (colors_pred[0, :, :, :].cpu().numpy() * 255).astype(np.uint8)
+        ).convert("RGB").save(f"{self.cfg.log_dir}/images/{self.name}/cam_pred.png")
 
         self.writer.add_scalar("MSE/cam", mse.item(), self.n_steps)
 
         fig, ax = plt.subplots(1, 2, figsize=(10, 5))
         ax[0].axis("off")
-        ax[0].imshow(colors[0].cpu().numpy() ** 2, cmap="gray")
+        ax[0].imshow(colors[0].cpu().numpy(), cmap="gray")
         ax[1].axis("off")
-        ax[1].imshow(colors_pred[0].cpu().numpy() ** 2, cmap="gray")
+        ax[1].imshow(colors_pred[0].cpu().numpy(), cmap="gray")
         plt.tight_layout()
         plt.savefig("fig.png")
         plt.close()
@@ -213,18 +223,18 @@ class Trainer:
 
         ##############################
 
-        colors = cut_edges(colors)
-        colors_pred = cut_edges(colors_pred)
-        mse_edge = F.mse_loss(colors, colors_pred).item()
+        # colors = cut_edges(colors)
+        # colors_pred = cut_edges(colors_pred)
+        # mse_edge = F.mse_loss(colors, colors_pred).item()
 
-        self.writer.add_scalar("MSE/cam_edge", mse_edge, self.n_steps)
+        # self.writer.add_scalar("MSE/cam_edge", mse_edge, self.n_steps)
 
-        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-        ax[0].axis("off")
-        ax[0].imshow(colors[0].cpu().numpy() ** 2, cmap="gray")
-        ax[1].axis("off")
-        ax[1].imshow(colors_pred[0].cpu().numpy() ** 2, cmap="gray")
-        plt.tight_layout()
-        plt.savefig("fig_edge.png")
-        plt.close()
-        plt.clf()
+        # fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+        # ax[0].axis("off")
+        # ax[0].imshow(colors[0].cpu().numpy(), cmap="gray")
+        # ax[1].axis("off")
+        # ax[1].imshow(colors_pred[0].cpu().numpy(), cmap="gray")
+        # plt.tight_layout()
+        # plt.savefig("fig_edge.png")
+        # plt.close()
+        # plt.clf()
