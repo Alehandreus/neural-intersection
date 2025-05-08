@@ -917,7 +917,7 @@ class NBVHModel2(nn.Module):
 
         return loss, acc, mse_loss, norm_mse_loss
 
-    def forward(self, batch, initial=False, true_dist=None):
+    def forward(self, batch, initial=False, true_batch=None):
         orig = batch.ray_origins
         vec = batch.ray_vectors
 
@@ -948,6 +948,10 @@ class NBVHModel2(nn.Module):
             pred_cls = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, pred_cls_c)
             pred_dist = torch.zeros((n_rays,), device="cuda").masked_scatter_(cur_mask, pred_dist_c) + cur_t1
             pred_normals = torch.zeros((n_rays, 3), device="cuda").masked_scatter_(cur_mask[:, None].expand(-1, 3), pred_normal_c)
+
+            if true_batch is not None:
+                pred_cls = (cur_t1 < true_batch.t) & (true_batch.t < cur_t2)
+                # pred_normals = true_batch.normals
 
             update_mask = (pred_cls > 0) & (pred_dist < dist) & cur_mask
             dist[update_mask] = pred_dist[update_mask]
