@@ -9,6 +9,9 @@ from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 from myutils.misc import MetricLogger, get_num_params, cut_edges
 from data import NBVHDataset
+from PIL import Image
+import numpy as np
+import os
 
 
 class Trainer:
@@ -30,6 +33,7 @@ class Trainer:
     def set_model(self, model, name="run"):
         self.model = model
         self.name = name
+        os.makedirs(f'{self.cfg.log_dir}/images/{self.name}', exist_ok=True)
         self.optimizer = torch.optim.Adam(model.parameters(), lr=self.cfg.train.lr)
 
         self.alpha = 0.99
@@ -194,47 +198,12 @@ class Trainer:
 
         self.writer.add_scalar("PSNR/cam", psnr.item(), self.n_steps)
 
-        # banana for reference
-        colors[0, 0, 0] = 0.0
-        colors_pred[0, 0, 0] = 0.0
+        def save(img, name):
+            Image.fromarray(
+                (img[0, :, :, :].cpu().numpy() * 255).astype(np.uint8)
+            ).convert("RGB").save(name)
 
-        import os
-        os.makedirs(f'{self.cfg.log_dir}/images/{self.name}', exist_ok=True)
-        from PIL import Image
-        import numpy as np
-        Image.fromarray(
-            (colors[0, :, :, :].cpu().numpy() * 255).astype(np.uint8)
-        ).convert("RGB").save(f"{self.cfg.log_dir}/images/{self.name}/cam.png")
-        Image.fromarray(
-            (colors_pred[0, :, :, :].cpu().numpy() * 255).astype(np.uint8)
-        ).convert("RGB").save(f"{self.cfg.log_dir}/images/{self.name}/cam_pred.png")
-
-        self.writer.add_scalar("MSE/cam", mse.item(), self.n_steps)
-
-        fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-        ax[0].axis("off")
-        ax[0].imshow(colors[0].cpu().numpy(), cmap="gray")
-        ax[1].axis("off")
-        ax[1].imshow(colors_pred[0].cpu().numpy(), cmap="gray")
-        plt.tight_layout()
-        plt.savefig("fig.png")
-        plt.close()
-        plt.clf()
-
-        ##############################
-
-        # colors = cut_edges(colors)
-        # colors_pred = cut_edges(colors_pred)
-        # mse_edge = F.mse_loss(colors, colors_pred).item()
-
-        # self.writer.add_scalar("MSE/cam_edge", mse_edge, self.n_steps)
-
-        # fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-        # ax[0].axis("off")
-        # ax[0].imshow(colors[0].cpu().numpy(), cmap="gray")
-        # ax[1].axis("off")
-        # ax[1].imshow(colors_pred[0].cpu().numpy(), cmap="gray")
-        # plt.tight_layout()
-        # plt.savefig("fig_edge.png")
-        # plt.close()
-        # plt.clf()
+        colors_cat = torch.cat([colors, colors_pred], dim=2)
+        save(colors_cat, f"fig.png")
+        save(colors, f"{self.cfg.log_dir}/images/{self.name}/cam.png")
+        save(colors_pred, f"{self.cfg.log_dir}/images/{self.name}/cam_pred.png")
