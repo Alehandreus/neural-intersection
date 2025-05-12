@@ -150,20 +150,22 @@ class Trainer:
         light_dir /= torch.norm(light_dir)
 
         # red = torch.tensor([187, 143, 138,], device='cuda') / 255.0
-        red = torch.tensor([1.0, 1.0, 1.0,], device='cuda')
+        # red = torch.tensor([1.0, 1.0, 1.0,], device='cuda')
         # red = red ** 2
 
         # a = torch.norm(img_normal, dim=-1, keepdim=True)
         # img_normal[a.sum(dim=)] = img_normal / 
 
-        gs = torch.sum(img_normal * light_dir[None, None, None, :], dim=-1, keepdim=True)# * 0.5 + 0.5
-        gs[gs < 0] = -gs[gs < 0]
-        gs = gs * 0.5 + 0.5
-        colors = gs * red[None, None, None, :]
+        # gs = torch.sum(img_normal * light_dir[None, None, None, :], dim=-1, keepdim=True)# * 0.5 + 0.5
+        # gs[gs < 0] = -gs[gs < 0]
+        # gs = gs * 0.5 + 0.5
+        # colors = gs * red[None, None, None, :]
+        colors = (img_normal * 0.5) + 0.5
 
-        gs_pred = torch.sum(img_normal_pred * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
-        gs_pred[gs_pred < 0.5] = 0.5
-        colors_pred = gs_pred * red[None, None, None, :]
+        # gs_pred = torch.sum(img_normal_pred * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
+        # gs_pred[gs_pred < 0.5] = 0.5
+        # colors_pred = gs_pred * red[None, None, None, :]
+        colors_pred = (img_normal_pred * 0.5) + 0.5
 
         # colors = (img_dist > 0).float()
         # colors_pred = (img_dist_pred > 0).float()        
