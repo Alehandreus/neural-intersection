@@ -123,7 +123,7 @@ class Trainer:
         bar = tqdm(range(self.ds_cam.n_batches()), leave=self.tqdm_leave)
         for batch_idx in bar:
             batch = self.ds_cam.get_batch(batch_idx)
-            mask_pred, dist_pred, normal_pred = self.model(batch, initial=initial, true_batch=batch)#, true_dist=batch.t)
+            mask_pred, dist_pred, normal_pred = self.model(batch, initial=initial, true_batch=batch)
             
             dist_pred = dist_pred.detach()
             normal_pred = normal_pred.detach()
@@ -145,26 +145,7 @@ class Trainer:
         img_dist_pred /= max_dist
         img_dist /= max_dist
 
-        # light_dir = torch.tensor([1.0, -1.0, 1.0], device="cuda")
-        light_dir = torch.tensor([1.0, -2.0, 1.5], device="cuda")
-        light_dir /= torch.norm(light_dir)
-
-        # red = torch.tensor([187, 143, 138,], device='cuda') / 255.0
-        # red = torch.tensor([1.0, 1.0, 1.0,], device='cuda')
-        # red = red ** 2
-
-        # a = torch.norm(img_normal, dim=-1, keepdim=True)
-        # img_normal[a.sum(dim=)] = img_normal / 
-
-        # gs = torch.sum(img_normal * light_dir[None, None, None, :], dim=-1, keepdim=True)# * 0.5 + 0.5
-        # gs[gs < 0] = -gs[gs < 0]
-        # gs = gs * 0.5 + 0.5
-        # colors = gs * red[None, None, None, :]
         colors = (img_normal * 0.5) + 0.5
-
-        # gs_pred = torch.sum(img_normal_pred * light_dir[None, None, None, :], dim=-1, keepdim=True) * 0.5 + 0.5
-        # gs_pred[gs_pred < 0.5] = 0.5
-        # colors_pred = gs_pred * red[None, None, None, :]
         colors_pred = (img_normal_pred * 0.5) + 0.5
 
         # colors = (img_dist > 0).float()
